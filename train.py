@@ -1,32 +1,65 @@
-import gym
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 import random
 from collections import deque
+from network_env import NetworkEnv  # <-- import your custom env
+from int_to_bin_action import int_to_binary_action, binary_action_to_int
+# (Or just define them inline if not in separate files)
 
-# 定義Q網路
+# -------------------------
+# 1) Create the environment
+# -------------------------
+env = NetworkEnv(
+    num_nodes=6,       # Adjust to keep edges small enough
+    max_interfaces=4,
+    max_capacity=100,
+    max_steps=20,
+    seed=42
+)
+
+num_edges = env.num_edges
+# Observation is 2 * num_edges in shape
+state_dim = 2 * num_edges
+# We treat each possible MultiBinary action as a discrete action => action_dim = 2^num_edges
+action_dim = 2 ** num_edges
+
+print(f"Number of edges: {num_edges}")
+print(f"Discrete action space size = {action_dim}")
+print(f"Observation space dim = {state_dim}")
+
+# -------------------------
+# 2) Define a Q-network
+# -------------------------
 class DQN(nn.Module):
     def __init__(self, state_dim, action_dim):
         super(DQN, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(state_dim, 64),
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 128),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(64, action_dim)
+            nn.Linear(128, action_dim)
         )
-
+        
     def forward(self, x):
-        return self.fc(x)
+        return self.net(x)
 
-# Replay Buffer (經驗回放)
+# -------------------------
+# 3) Replay Buffer
+# -------------------------
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
+        """
+        state, next_state: np.ndarray of shape [state_dim]
+        action: int in [0, 2^num_edges - 1]
+        reward: float
+        done: bool
+        """
         self.buffer.append((state, action, reward, next_state, done))
 
     def sample(self, batch_size):
@@ -37,11 +70,9 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-# 定義超參數
-env = gym.make('CartPole-v1')
-state_dim = env.observation_space.shape[0]
-action_dim = env.action_space.n
-
+# -------------------------
+# 4) Define Training Params
+# -------------------------
 lr = 1e-3
 gamma = 0.99
 batch_size = 64
@@ -52,67 +83,78 @@ epsilon_decay = 0.995
 target_update_freq = 10
 episodes = 300
 
-# 初始化網路
 q_net = DQN(state_dim, action_dim)
 target_net = DQN(state_dim, action_dim)
 target_net.load_state_dict(q_net.state_dict())
 
 optimizer = optim.Adam(q_net.parameters(), lr=lr)
-buffer = ReplayBuffer(buffer_size)
+replay_buffer = ReplayBuffer(buffer_size)
 criterion = nn.MSELoss()
 
 epsilon = epsilon_start
 
-# 訓練主迴圈
+# -------------------------
+# 5) Training Loop
+# -------------------------
 for episode in range(episodes):
-    state = env.reset()
-    total_reward = 0
-
-    while True:
-        # ε-greedy 動作選擇
+    state = env.reset()  # shape = [2*num_edges]
+    total_reward = 0.0
+    done = False
+    
+    while not done:
+        # Epsilon-greedy for discrete actions in [0, 2^num_edges - 1]
         if random.random() < epsilon:
-            action = env.action_space.sample()
+            action_index = random.randint(0, action_dim - 1)
         else:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            q_values = q_net(state_tensor)
-            action = q_values.argmax().item()
+            with torch.no_grad():
+                state_tensor = torch.FloatTensor(state).unsqueeze(0)  # shape [1, state_dim]
+                q_values = q_net(state_tensor)                        # shape [1, action_dim]
+                action_index = q_values.argmax(dim=1).item()
+        
+        # Convert discrete action index -> MultiBinary edge vector
+        bin_action = int_to_binary_action(action_index, num_edges)
 
-        next_state, reward, done, _ = env.step(action)
-        buffer.push(state, action, reward, next_state, done)
+        # Step the environment
+        next_state, reward, done, info = env.step(bin_action)
+        
+        # Store in replay buffer
+        replay_buffer.push(state, action_index, reward, next_state, done)
+        
         state = next_state
         total_reward += reward
 
-        # 訓練 Q 網路
-        if len(buffer) >= batch_size:
-            states, actions, rewards, next_states, dones = buffer.sample(batch_size)
+        # Train if we have enough samples
+        if len(replay_buffer) >= batch_size:
+            states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
 
-            states_tensor = torch.FloatTensor(states)
-            actions_tensor = torch.LongTensor(actions).unsqueeze(1)
-            rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)
-            next_states_tensor = torch.FloatTensor(next_states)
-            dones_tensor = torch.FloatTensor(dones).unsqueeze(1)
+            states_tensor = torch.FloatTensor(states)               # [batch_size, state_dim]
+            actions_tensor = torch.LongTensor(actions).unsqueeze(1) # [batch_size, 1]
+            rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)# [batch_size, 1]
+            next_states_tensor = torch.FloatTensor(next_states)      # [batch_size, state_dim]
+            dones_tensor = torch.FloatTensor(dones).unsqueeze(1)     # [batch_size, 1]
 
-            # 計算目標 Q 值
-            current_q = q_net(states_tensor).gather(1, actions_tensor)
-            next_q = target_net(next_states_tensor).max(1)[0].unsqueeze(1)
-            target_q = rewards_tensor + gamma * next_q * (1 - dones_tensor)
+            # Q(s,a)
+            current_q = q_net(states_tensor).gather(1, actions_tensor)  # shape [batch_size, 1]
 
-            # 更新 Q 網路
-            loss = criterion(current_q, target_q.detach())
+            # Q_target(s', a') using target_net
+            with torch.no_grad():
+                max_next_q = target_net(next_states_tensor).max(dim=1)[0].unsqueeze(1)  # [batch_size, 1]
+                target_q = rewards_tensor + gamma * max_next_q * (1 - dones_tensor)
+
+            # Compute loss
+            loss = criterion(current_q, target_q)
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        if done:
-            break
-
-    # 更新epsilon
+    # Epsilon decay
     epsilon = max(epsilon_end, epsilon_decay * epsilon)
 
-    # 定期更新目標網路
+    # Update target network
     if episode % target_update_freq == 0:
         target_net.load_state_dict(q_net.state_dict())
 
-    print(f"Episode: {episode}, Reward: {total_reward}, Epsilon: {epsilon:.3f}")
+    print(f"Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
 
 env.close()

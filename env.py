@@ -30,7 +30,7 @@ class NetworkEnv(gym.Env):
 
     def __init__(
         self, 
-        num_nodes=17, 
+        num_nodes=6, 
         max_interfaces=4, 
         max_capacity=100, 
         max_steps=10, 
