@@ -4,10 +4,24 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 from collections import deque
-from network_env import NetworkEnv  # <-- import your custom env
-from int_to_bin_action import int_to_binary_action, binary_action_to_int
+from env import NetworkEnv  # <-- import your custom env
+# from int_to_bin_action import int_to_binary_action, binary_action_to_int
 # (Or just define them inline if not in separate files)
 
+def int_to_binary_action(index, num_edges):
+    """
+    Convert an integer index in [0, 2^num_edges - 1] 
+    to a binary vector of length num_edges.
+    """
+    return np.array([int(x) for x in np.binary_repr(index, width=num_edges)], dtype=int)
+
+def binary_action_to_int(action_array):
+    """
+    Convert a binary vector (shape [num_edges]) to an integer in [0, 2^num_edges - 1].
+    """
+    # E.g. [1,0,1] => '101' => int=5
+    bits_str = ''.join(str(x) for x in action_array)
+    return int(bits_str, 2)
 # -------------------------
 # 1) Create the environment
 # -------------------------
@@ -96,65 +110,67 @@ epsilon = epsilon_start
 # -------------------------
 # 5) Training Loop
 # -------------------------
-for episode in range(episodes):
-    state = env.reset()  # shape = [2*num_edges]
-    total_reward = 0.0
-    done = False
-    
-    while not done:
-        # Epsilon-greedy for discrete actions in [0, 2^num_edges - 1]
-        if random.random() < epsilon:
-            action_index = random.randint(0, action_dim - 1)
-        else:
-            with torch.no_grad():
-                state_tensor = torch.FloatTensor(state).unsqueeze(0)  # shape [1, state_dim]
-                q_values = q_net(state_tensor)                        # shape [1, action_dim]
-                action_index = q_values.argmax(dim=1).item()
+for time in range(24):
+    # train episodes every hour in a day 
+    for episode in range(episodes):
+        state = env.reset(time)  # shape = [2*num_edges]
+        total_reward = 0.0
+        done = False
         
-        # Convert discrete action index -> MultiBinary edge vector
-        bin_action = int_to_binary_action(action_index, num_edges)
+        while not done:
+            # Epsilon-greedy for discrete actions in [0, 2^num_edges - 1]
+            if random.random() < epsilon:
+                action_index = random.randint(0, action_dim - 1)
+            else:
+                with torch.no_grad():
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0)  # shape [1, state_dim]
+                    q_values = q_net(state_tensor)                        # shape [1, action_dim]
+                    action_index = q_values.argmax(dim=1).item()
+            
+            # Convert discrete action index -> MultiBinary edge vector
+            bin_action = int_to_binary_action(action_index, num_edges)
 
-        # Step the environment
-        next_state, reward, done, info = env.step(bin_action)
-        
-        # Store in replay buffer
-        replay_buffer.push(state, action_index, reward, next_state, done)
-        
-        state = next_state
-        total_reward += reward
+            # Step the environment
+            next_state, reward, done, info = env.step(bin_action)
+            
+            # Store in replay buffer
+            replay_buffer.push(state, action_index, reward, next_state, done)
+            
+            state = next_state
+            total_reward += reward
 
-        # Train if we have enough samples
-        if len(replay_buffer) >= batch_size:
-            states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+            # Train if we have enough samples
+            if len(replay_buffer) >= batch_size:
+                states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
 
-            states_tensor = torch.FloatTensor(states)               # [batch_size, state_dim]
-            actions_tensor = torch.LongTensor(actions).unsqueeze(1) # [batch_size, 1]
-            rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)# [batch_size, 1]
-            next_states_tensor = torch.FloatTensor(next_states)      # [batch_size, state_dim]
-            dones_tensor = torch.FloatTensor(dones).unsqueeze(1)     # [batch_size, 1]
+                states_tensor = torch.FloatTensor(states)               # [batch_size, state_dim]
+                actions_tensor = torch.LongTensor(actions).unsqueeze(1) # [batch_size, 1]
+                rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)# [batch_size, 1]
+                next_states_tensor = torch.FloatTensor(next_states)      # [batch_size, state_dim]
+                dones_tensor = torch.FloatTensor(dones).unsqueeze(1)     # [batch_size, 1]
 
-            # Q(s,a)
-            current_q = q_net(states_tensor).gather(1, actions_tensor)  # shape [batch_size, 1]
+                # Q(s,a)
+                current_q = q_net(states_tensor).gather(1, actions_tensor)  # shape [batch_size, 1]
 
-            # Q_target(s', a') using target_net
-            with torch.no_grad():
-                max_next_q = target_net(next_states_tensor).max(dim=1)[0].unsqueeze(1)  # [batch_size, 1]
-                target_q = rewards_tensor + gamma * max_next_q * (1 - dones_tensor)
+                # Q_target(s', a') using target_net
+                with torch.no_grad():
+                    max_next_q = target_net(next_states_tensor).max(dim=1)[0].unsqueeze(1)  # [batch_size, 1]
+                    target_q = rewards_tensor + gamma * max_next_q * (1 - dones_tensor)
 
-            # Compute loss
-            loss = criterion(current_q, target_q)
+                # Compute loss
+                loss = criterion(current_q, target_q)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-    # Epsilon decay
-    epsilon = max(epsilon_end, epsilon_decay * epsilon)
+        # Epsilon decay
+        epsilon = max(epsilon_end, epsilon_decay * epsilon)
 
-    # Update target network
-    if episode % target_update_freq == 0:
-        target_net.load_state_dict(q_net.state_dict())
+        # Update target network
+        if episode % target_update_freq == 0:
+            target_net.load_state_dict(q_net.state_dict())
 
-    print(f"Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
+        print(f"Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
 
 env.close()

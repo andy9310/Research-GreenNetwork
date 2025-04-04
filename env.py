@@ -2,7 +2,8 @@ import gym
 import numpy as np
 import networkx as nx
 from gym import spaces
-
+import json
+import matplotlib.pyplot as plt
 
 class NetworkEnv(gym.Env):
     """
@@ -78,7 +79,29 @@ class NetworkEnv(gym.Env):
         
         # Track current usage of each edge; usage[i] is the traffic currently on edge i
         self.usage = np.zeros(self.num_edges, dtype=float)
-        
+    def _traffic_generator(self,time):
+        # Generate random traffic matrix on "time"
+        # For demonstration, let traffic[i, i] = 0
+        # and each i->j (i != j) has some random traffic, up to e.g. 100%
+        with open("traffic_data.json", "r") as f:
+            traffic = json.loads(f)
+        low_bound, upper_bound = 0,0
+        if time>=0 and time<9:
+            low_bound = traffic["0"]["low"]
+            upper_bound = traffic["0"]["high"]
+        elif time>=9 and time<19:
+            low_bound = traffic["9"]["low"]
+            upper_bound = traffic["9"]["high"]
+        elif time>=19 and time<23:
+            low_bound = traffic["19"]["low"]
+            upper_bound = traffic["19"]["high"]
+        else:
+            low_bound = traffic["23"]["low"]
+            upper_bound = traffic["23"]["high"]
+        self.traffic = np.random.randint(low=low_bound, high=upper_bound, size=(self.num_nodes, self.num_nodes))
+        for i in range(self.num_nodes):
+            self.traffic[i, i] = 0
+
     def _build_topology(self):
         """
         Create a random network topology with constraints:
@@ -120,8 +143,30 @@ class NetworkEnv(gym.Env):
                 self.graph.add_edge(u, v, capacity=self.max_capacity)
         
         # Now we have a random topology with each node having up to max_interfaces edges.
-    
-    def reset(self):
+    def visualize_topology(self, number):
+        filename=f"topology_{number}.png"
+        # Create a layout for the nodes
+        pos = nx.spring_layout(self.graph)
+
+        # Draw the graph components
+        nx.draw_networkx_nodes(self.graph, pos)
+        nx.draw_networkx_edges(self.graph, pos)
+        nx.draw_networkx_labels(self.graph, pos)
+        
+        # Show edge capacities (optional)
+        edge_labels = nx.get_edge_attributes(self.graph, 'capacity')
+        nx.draw_networkx_edge_labels(self.graph, pos, edge_labels=edge_labels)
+
+        # Make it look nice
+        plt.title("Random Network Topology")
+        plt.axis("off")
+
+        # Save the figure instead of displaying it
+        plt.savefig(filename, dpi=300)
+        # Clear the current figure to avoid overlapping drawings if you plot again later
+        plt.clf()
+
+    def reset(self, time):
         """
         Reset the environment:
           - Generate a random traffic matrix
@@ -130,13 +175,7 @@ class NetworkEnv(gym.Env):
           - Return initial observation
         """
         self.current_step = 0
-        
-        # Generate random traffic matrix
-        # For demonstration, let traffic[i, i] = 0
-        # and each i->j (i != j) has some random traffic, up to e.g. 50
-        self.traffic = np.random.randint(low=0, high=50, size=(self.num_nodes, self.num_nodes))
-        for i in range(self.num_nodes):
-            self.traffic[i, i] = 0
+        self._build_topology()
         
         # Reset usage on each edge to 0
         self.usage = np.zeros(self.num_edges, dtype=float)
@@ -182,15 +221,17 @@ class NetworkEnv(gym.Env):
         self.link_open = action.copy()
         
         # Recompute link usage with the new open/closed configuration
-        self._update_link_usage()
+        link_usage_valid = self._update_link_usage()
         
         # Calculate how many links are overloaded
         overloaded_links = self._count_overloaded_links()
         
-        # For example, let reward = - (number of overloaded links)
+        # 
         reward = -float(overloaded_links)
         
         # Check if done
+        if link_usage_valid == False:
+            done = True
         done = (self.current_step >= self.max_steps)
         
         # (Optional) info dict
