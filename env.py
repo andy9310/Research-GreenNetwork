@@ -31,19 +31,24 @@ class NetworkEnv(gym.Env):
 
     def __init__(
         self, 
-        num_nodes=6, 
+        num_nodes=17, 
         max_interfaces=4, 
         max_capacity=100, 
-        max_steps=10, 
+        max_steps=20, 
         seed=None
     ):
         super(NetworkEnv, self).__init__()
         
         self.num_nodes = num_nodes
+        self.node_list = [0 for num in range(num_nodes)]
         self.max_interfaces = max_interfaces
         self.max_capacity = max_capacity
         self.max_steps = max_steps
         self.current_step = 0
+
+        ## penalty
+        self.isolated_penalty = 100000
+        self.overloaded_penalty = 100
         
         if seed is not None:
             np.random.seed(seed)
@@ -143,6 +148,18 @@ class NetworkEnv(gym.Env):
                 self.graph.add_edge(u, v, capacity=self.max_capacity)
         
         # Now we have a random topology with each node having up to max_interfaces edges.
+    def _build_subgraph(self):
+        """
+        Return a new graph G_open that only contains edges which are open.
+        """
+        G_open = nx.Graph()
+        G_open.add_nodes_from(self.graph.nodes(data=True))
+        for i, (u, v) in enumerate(self.edge_list):
+            if self.link_open[i] == 1:
+                cap = self.graph[u][v]['capacity']
+                G_open.add_edge(u, v, capacity=cap)
+        return G_open
+    
     def visualize_topology(self, number):
         filename=f"topology_{number}.png"
         # Create a layout for the nodes
@@ -206,40 +223,70 @@ class NetworkEnv(gym.Env):
             obs.append(usage_ratio)
             obs.append(is_open)
         return np.array(obs, dtype=np.float32)
+    def _env_reward(self, isolated_violation, overloaded_violation, energy_saving):
+        reward = 0
+        if isolated_violation:
+            reward=reward-self.isolated_penalty
+        if overloaded_violation:
+            reward=reward-self.overloaded_penalty*self._count_overloaded_links()
+        reward=reward+energy_saving
+        return reward
+        
+    def _rule_check(self, G_open):
+        # rules that should not be violated
+        """
+        Returns two booleans: (isolated_violation, overloaded_violation).
+        1) Isolated node violation: any node in G_open with degree == 0
+        2) Overloaded link violation: any link usage > capacity
+        """
+        # Rule 1: check for isolated node
+        # If an edge is closed, it won't appear in G_open, so a node with no open links has degree=0
+        for node in G_open.nodes():
+            if G_open.degree(node) == 0:
+                # found an isolated node
+                isolated_violation = True
+                break
+        else:
+            isolated_violation = False
+        
+        # Rule 2: check for any link usage > capacity
+        overloaded_violation = False
+        for i, (u, v) in enumerate(self.edge_list):
+            if self.link_open[i] == 1:  # only consider edges that are open
+                cap = self.graph[u][v]['capacity']
+                if self.usage[i] > cap:
+                    overloaded_violation = True
+                    break
+        
+        return isolated_violation, overloaded_violation
     
     def step(self, action):
         """
-        Take an action (binary vector of length num_edges):
+        Take an action (node number , binary vector of length num_edges):
           - Close or open each link based on action bits.
           - Reroute traffic on the resulting network.
           - Compute the reward as negative of the number of overloaded links.
           - Return (observation, reward, done, info)
         """
         self.current_step += 1
-        
-        # Apply action to links
-        self.link_open = action.copy()
-        
+        # Apply action
+        self.node_selected = action['node'].copy()
+        self.interface_close = action['interface'].copy()
         # Recompute link usage with the new open/closed configuration
-        link_usage_valid = self._update_link_usage()
-        
-        # Calculate how many links are overloaded
-        overloaded_links = self._count_overloaded_links()
-        
-        # 
-        reward = -float(overloaded_links)
-        
-        # Check if done
-        if link_usage_valid == False:
+        updated_topology, energy_saving = self._update_link_usage()
+        isolated_violation, overloaded_violation = self._rule_check(updated_topology)
+        # reward function
+        reward = self._env_reward(isolated_violation, overloaded_violation, energy_saving)
+        # Check episode terminate status
+        # if violate rule 1 and 2 , terminate
+        if self.RuleCheck():
             done = True
-        done = (self.current_step >= self.max_steps)
+        elif 0 in self.node_list:
+            done = False
+        else:
+            done = True
         
-        # (Optional) info dict
-        info = {
-            'overloaded_links': overloaded_links
-        }
-        
-        return self._get_observation(), reward, done, info
+        return self._get_observation(), reward, done
 
     def _update_link_usage(self):
         """

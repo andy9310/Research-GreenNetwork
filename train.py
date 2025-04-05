@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 from collections import deque
+from tqdm import tqdm
 from env import NetworkEnv  # <-- import your custom env
 # from int_to_bin_action import int_to_binary_action, binary_action_to_int
 # (Or just define them inline if not in separate files)
@@ -26,7 +27,7 @@ def binary_action_to_int(action_array):
 # 1) Create the environment
 # -------------------------
 env = NetworkEnv(
-    num_nodes=6,       # Adjust to keep edges small enough
+    num_nodes=17,       # Adjust to keep edges small enough
     max_interfaces=4,
     max_capacity=100,
     max_steps=20,
@@ -36,8 +37,8 @@ env = NetworkEnv(
 num_edges = env.num_edges
 # Observation is 2 * num_edges in shape
 state_dim = 2 * num_edges
-# We treat each possible MultiBinary action as a discrete action => action_dim = 2^num_edges
-action_dim = 2 ** num_edges
+# open or close 4 interfaces of each node
+action_dim = 2 ** env.max_interfaces
 
 print(f"Number of edges: {num_edges}")
 print(f"Discrete action space size = {action_dim}")
@@ -110,16 +111,19 @@ epsilon = epsilon_start
 # -------------------------
 # 5) Training Loop
 # -------------------------
-for time in range(24):
+for time in tqdm(range(24), desc='Training Hours'):
     # train episodes every hour in a day 
-    for episode in range(episodes):
+    for episode in tqdm(range(episodes), desc=f'Hour {time} Episodes', leave=False):
         state = env.reset(time)  # shape = [2*num_edges]
         total_reward = 0.0
         done = False
         
         while not done:
-            # Epsilon-greedy for discrete actions in [0, 2^num_edges - 1]
+            # Epsilon-greedy for discrete selected nodes
+
+            # Epsilon-greedy for discrete selected interface
             if random.random() < epsilon:
+                node_index = random.randint(0, env.num_nodes - 1)
                 action_index = random.randint(0, action_dim - 1)
             else:
                 with torch.no_grad():
@@ -131,7 +135,7 @@ for time in range(24):
             bin_action = int_to_binary_action(action_index, num_edges)
 
             # Step the environment
-            next_state, reward, done, info = env.step(bin_action)
+            next_state, reward, done, info = env.step(node_index, bin_action)
             
             # Store in replay buffer
             replay_buffer.push(state, action_index, reward, next_state, done)
@@ -171,6 +175,7 @@ for time in range(24):
         if episode % target_update_freq == 0:
             target_net.load_state_dict(q_net.state_dict())
 
-        print(f"Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
+        # Update tqdm postfix to show metrics
+        tqdm.write(f"Hour {time}, Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
 
 env.close()
