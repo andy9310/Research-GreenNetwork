@@ -1,0 +1,5 @@
+numpy
+networkx
+gymnasium # Use gymnasium instead of gym
+torch
+tqdm

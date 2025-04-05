@@ -1,181 +1,128 @@
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import random
-from collections import deque
-from tqdm import tqdm
-from env import NetworkEnv  # <-- import your custom env
-# from int_to_bin_action import int_to_binary_action, binary_action_to_int
-# (Or just define them inline if not in separate files)
+import numpy as np
+from env import NetworkEnv # Assuming env.py is in the same directory
+from agent import DQN, ReplayBuffer # Assuming agent.py contains DQN and ReplayBuffer
+import json # Import the json library
+import time # Import time for seeding if needed
+from tqdm import tqdm # Import tqdm for progress bar
 
-def int_to_binary_action(index, num_edges):
-    """
-    Convert an integer index in [0, 2^num_edges - 1] 
-    to a binary vector of length num_edges.
-    """
-    return np.array([int(x) for x in np.binary_repr(index, width=num_edges)], dtype=int)
+# --- Load Configuration from JSON ---
+def load_config(config_path="config.json"):
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    return config
 
-def binary_action_to_int(action_array):
-    """
-    Convert a binary vector (shape [num_edges]) to an integer in [0, 2^num_edges - 1].
-    """
-    # E.g. [1,0,1] => '101' => int=5
-    bits_str = ''.join(str(x) for x in action_array)
-    return int(bits_str, 2)
-# -------------------------
-# 1) Create the environment
-# -------------------------
+config = load_config()
+
+# --- Environment Setup (Load from config) ---
+num_nodes = config["num_nodes"]
+adj_matrix = config["adj_matrix"]
+edge_list = config["edge_list"]
+node_props = config["node_props"]
+tm_list = config["tm_list"]
+link_capacity = config["link_capacity"]
+max_edges = config["max_edges"] # Load max_edges
+
+# --- Environment Instantiation ---
+seed = 42 # Keep a fixed seed for training reproducibility
 env = NetworkEnv(
-    num_nodes=17,       # Adjust to keep edges small enough
-    max_interfaces=4,
-    max_capacity=100,
-    max_steps=20,
-    seed=42
+    adj_matrix=adj_matrix,
+    edge_list=edge_list,
+    tm_list=tm_list,
+    node_props=node_props,
+    num_nodes=num_nodes,
+    link_capacity=link_capacity,
+    max_edges=max_edges, # Pass max_edges to env
+    seed=seed
 )
 
-num_edges = env.num_edges
-# Observation is 2 * num_edges in shape
-state_dim = 2 * num_edges
-# open or close 4 interfaces of each node
-action_dim = 2 ** env.max_interfaces
+num_actual_edges = env.num_edges # Actual edges in this specific config
 
-print(f"Number of edges: {num_edges}")
-print(f"Discrete action space size = {action_dim}")
-print(f"Observation space dim = {state_dim}")
+# --- Agent Setup ---
+# State dimension based on padded observation space
+state_dim = env.observation_space.shape[0] # Get state dim from env
+action_dim = env.action_space.n # Should be 2
 
-# -------------------------
-# 2) Define a Q-network
-# -------------------------
-class DQN(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(DQN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, action_dim)
-        )
-        
-    def forward(self, x):
-        return self.net(x)
+print(f"Topology: {num_actual_edges} actual edges (max_edges={max_edges})")
+print(f"State Dimension (Padded): {state_dim}")
+print(f"Action Dimension: {action_dim}")
 
-# -------------------------
-# 3) Replay Buffer
-# -------------------------
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state, action, reward, next_state, done):
-        """
-        state, next_state: np.ndarray of shape [state_dim]
-        action: int in [0, 2^num_edges - 1]
-        reward: float
-        done: bool
-        """
-        self.buffer.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.stack, zip(*batch))
-        return state, action, reward, next_state, done
-
-    def __len__(self):
-        return len(self.buffer)
-
-# -------------------------
-# 4) Define Training Params
-# -------------------------
-lr = 1e-3
+# Hyperparameters
+hidden_dim = 128
+learning_rate = 1e-4
 gamma = 0.99
-batch_size = 64
-buffer_size = 10000
+buffer_size = 100000 # Increased buffer size
+batch_size = 128     # Increased batch size
+
 epsilon_start = 1.0
-epsilon_end = 0.01
-epsilon_decay = 0.995
-target_update_freq = 10
-episodes = 300
+epsilon_end = 0.05
+epsilon_decay_steps = 20000 # Adjust decay steps based on expected total steps
+target_update_freq = 1000  # Update target net less frequently (in steps)
 
-q_net = DQN(state_dim, action_dim)
-target_net = DQN(state_dim, action_dim)
-target_net.load_state_dict(q_net.state_dict())
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-optimizer = optim.Adam(q_net.parameters(), lr=lr)
+agent = DQN(state_dim, action_dim, hidden_dim=hidden_dim, lr=learning_rate, gamma=gamma, device=device)
 replay_buffer = ReplayBuffer(buffer_size)
-criterion = nn.MSELoss()
 
+# --- Training Loop ---
+num_episodes = 5000 # Adjust as needed
 epsilon = epsilon_start
+total_steps = 0
+episode_rewards = []
+print_interval = 100
 
-# -------------------------
-# 5) Training Loop
-# -------------------------
-for time in tqdm(range(24), desc='Training Hours'):
-    # train episodes every hour in a day 
-    for episode in tqdm(range(episodes), desc=f'Hour {time} Episodes', leave=False):
-        state = env.reset(time)  # shape = [2*num_edges]
-        total_reward = 0.0
-        done = False
-        
-        while not done:
-            # Epsilon-greedy for discrete selected nodes
+print("\nStarting Training...")
+for episode in tqdm(range(num_episodes), desc="Training Episodes"): # Use tqdm
+    state = env.reset() # Env reset now returns only obs
+    episode_reward = 0
+    done = False
 
-            # Epsilon-greedy for discrete selected interface
-            if random.random() < epsilon:
-                node_index = random.randint(0, env.num_nodes - 1)
-                action_index = random.randint(0, action_dim - 1)
-            else:
-                with torch.no_grad():
-                    state_tensor = torch.FloatTensor(state).unsqueeze(0)  # shape [1, state_dim]
-                    q_values = q_net(state_tensor)                        # shape [1, action_dim]
-                    action_index = q_values.argmax(dim=1).item()
-            
-            # Convert discrete action index -> MultiBinary edge vector
-            bin_action = int_to_binary_action(action_index, num_edges)
+    while not done:
+        total_steps += 1
 
-            # Step the environment
-            next_state, reward, done, info = env.step(node_index, bin_action)
-            
-            # Store in replay buffer
-            replay_buffer.push(state, action_index, reward, next_state, done)
-            
-            state = next_state
-            total_reward += reward
+        # Calculate current epsilon
+        # Linear decay: max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (total_steps / epsilon_decay_steps))
+        # Exponential decay: epsilon_end + (epsilon_start - epsilon_end) * np.exp(-1. * total_steps / epsilon_decay_steps)
+        epsilon = max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (total_steps / epsilon_decay_steps))
 
-            # Train if we have enough samples
-            if len(replay_buffer) >= batch_size:
-                states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+        # Select action using epsilon-greedy (no mask needed for action_dim=2)
+        action = agent.select_action(state, epsilon)
 
-                states_tensor = torch.FloatTensor(states)               # [batch_size, state_dim]
-                actions_tensor = torch.LongTensor(actions).unsqueeze(1) # [batch_size, 1]
-                rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1)# [batch_size, 1]
-                next_states_tensor = torch.FloatTensor(next_states)      # [batch_size, state_dim]
-                dones_tensor = torch.FloatTensor(dones).unsqueeze(1)     # [batch_size, 1]
+        # Execute action in environment
+        next_state, reward, done, info = env.step(action)
 
-                # Q(s,a)
-                current_q = q_net(states_tensor).gather(1, actions_tensor)  # shape [batch_size, 1]
+        # Store experience in replay buffer
+        replay_buffer.push(state, action, reward, next_state, done)
 
-                # Q_target(s', a') using target_net
-                with torch.no_grad():
-                    max_next_q = target_net(next_states_tensor).max(dim=1)[0].unsqueeze(1)  # [batch_size, 1]
-                    target_q = rewards_tensor + gamma * max_next_q * (1 - dones_tensor)
+        # Move to the next state
+        state = next_state
+        episode_reward += reward
 
-                # Compute loss
-                loss = criterion(current_q, target_q)
+        # Perform learning step if buffer has enough samples
+        if len(replay_buffer) > batch_size:
+            loss = agent.learn(replay_buffer, batch_size)
+            # Optionally log loss
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+        # Update target network periodically
+        if total_steps % target_update_freq == 0:
+            agent.update_target_net()
 
-        # Epsilon decay
-        epsilon = max(epsilon_end, epsilon_decay * epsilon)
+        # Episode finished (either done or max steps per episode if implemented)
+        if done:
+            break
 
-        # Update target network
-        if episode % target_update_freq == 0:
-            target_net.load_state_dict(q_net.state_dict())
+    episode_rewards.append(episode_reward)
+    if (episode + 1) % print_interval == 0:
+        avg_reward = np.mean(episode_rewards[-print_interval:])
+        # Clearer progress print using tqdm's position
+        tqdm.write(f"Episode {episode + 1}/{num_episodes}, Avg Reward (Last {print_interval}): {avg_reward:.2f}, Epsilon: {epsilon:.3f}, Total Steps: {total_steps}")
 
-        # Update tqdm postfix to show metrics
-        tqdm.write(f"Hour {time}, Episode: {episode}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
 
-env.close()
+print("\nTraining finished.")
+
+# --- Save Model --- 
+model_save_path = "dqn_network_model_padded.pth"
+print(f"Saving trained model to {model_save_path}...")
+torch.save(agent.policy_net.state_dict(), model_save_path)
+print("Model saved.")
