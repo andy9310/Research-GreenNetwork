@@ -32,8 +32,8 @@ class NetworkEnv(gym.Env):
             self.graph.add_edge(u, v, capacity=self.link_capacity, weight=1, id=i) # Add edge index 'id'
 
         # --- Action and Observation Space (Based on max_edges) ---
-        # Action: Choose which link's status to decide (0 to max_edges-1)
-        self.action_space = spaces.Discrete(self.max_edges)
+        # Action: Decide whether to close (0) or keep open (1) the current link
+        self.action_space = spaces.Discrete(2)
 
         # Observation: [link_open_status (max_edges), link_usage (max_edges), current_edge_idx (1)]
         # Pad with a distinct value, e.g., -1, if needed, or use masking carefully.
@@ -46,11 +46,12 @@ class NetworkEnv(gym.Env):
         self.link_open = np.ones(self.num_edges, dtype=int) # Initially all links are open
         self.usage = np.zeros(self.num_edges, dtype=float)
         self.traffic = None
+        self.current_tm_idx = 0  # Default to first traffic matrix
 
         # Reward structure (can be loaded from config if needed)
-        self.energy_unit_reward = 2 # Reward for closing one link without violation
-        self.isolated_penalty = 100
-        self.overloaded_penalty = 50
+        self.energy_unit_reward = 10 # Reward for closing one link without violation
+        self.isolated_penalty = 1000
+        self.overloaded_penalty = 10
 
     def _get_observation(self):
         """Constructs the observation vector, padded to max_edges."""
@@ -66,15 +67,18 @@ class NetworkEnv(gym.Env):
         return obs
 
     def _get_action_mask(self):
-        """Creates a mask for valid actions (edges in the current topology)."""
-        mask = np.zeros(self.max_edges, dtype=bool)
-        mask[:self.num_edges] = True # Only the first num_edges actions are valid
-        return mask
+        """Creates a mask for valid actions (always [True, True] since both close/open are valid)."""
+        return np.array([True, True], dtype=bool)  # Both actions (close/open) are always valid
 
     def reset(self):
         """Resets the environment for a new episode."""
-        # Choose a traffic matrix for the episode
-        self.traffic = random.choice(self.tm_list).copy() # Use a copy
+        # Use the current traffic matrix index if available
+        # This allows for cycling through matrices during training
+        if hasattr(self, 'current_tm_idx') and 0 <= self.current_tm_idx < len(self.tm_list):
+            self.traffic = self.tm_list[self.current_tm_idx].copy()
+        else:
+            # Fall back to random selection if index is invalid
+            self.traffic = random.choice(self.tm_list).copy() # Use a copy
 
         # Reset state variables
         self.current_edge_idx = 0
@@ -94,27 +98,13 @@ class NetworkEnv(gym.Env):
         done = False
         info = {}
 
-        # The action directly corresponds to the edge index whose state we are deciding
-        # Note: The agent should only select actions where mask is True.
-        # We assume the agent respects the mask, so action < self.num_edges
-        if action >= self.num_edges:
-            # This case should ideally not happen if the agent uses the mask correctly
-            # Penalize heavily or raise an error if an invalid action is chosen
-            reward = -200 # Heavy penalty for trying to act on a non-existent edge
-            print(f"Warning: Agent chose invalid action {action} >= num_edges {self.num_edges}. Masking failed? Current Edge Idx: {self.current_edge_idx}")
-            # State doesn't change, but we move to the next decision point
-            self.current_edge_idx += 1
+        # Action should be 0 (close) or 1 (keep open)
+        if action not in [0, 1]:
+            raise ValueError(f"Invalid action {action}. Must be 0 (close) or 1 (keep open)")
 
         else:
-            edge_to_consider = action # The action *is* the edge index
-
-            # For simplicity in this step-by-step decision, let's assume the agent decides
-            # the state of link `edge_to_consider`. Let's say 1 means keep open, 0 means try to close.
-            # A more standard RL approach would have action 0 = 'close edge k', action 1 = 'keep edge k open',
-            # where k is self.current_edge_idx. Let's adapt to that.
-
-            # --- Corrected Logic: Action decides state of current_edge_idx --- 
-            chosen_action_for_current_edge = action # Let's redefine: action 0=close, 1=keep open
+            # Action 0 means try to close the current link, 1 means keep it open
+            chosen_action_for_current_edge = action  # 0=close, 1=keep open
             edge_to_modify = self.current_edge_idx
 
             if chosen_action_for_current_edge == 0: # Try to close the link
@@ -132,10 +122,11 @@ class NetworkEnv(gym.Env):
                     self._update_link_usage() # Recalculate usage with link open again
                     reward = 0 # No reward for trying to close if it causes violation
                     if isolated:
-                        reward -= self.isolated_penalty
-                    if overloaded:
-                        reward -= self.overloaded_penalty * num_overloaded
+                        reward = -self.isolated_penalty
+                    elif overloaded:
+                        reward = -self.overloaded_penalty * num_overloaded
                     info['violation'] = 'isolated' if isolated else 'overloaded'
+                    done = True  # Terminate episode on violation
                 else:
                     # No violation - success! Keep link closed and give reward.
                     reward = self.energy_unit_reward
@@ -152,6 +143,7 @@ class NetworkEnv(gym.Env):
 
         # --- Check if episode is done --- 
         if self.current_edge_idx >= self.num_edges:
+            # reward += 10 # give a final reward
             done = True
             # No final reward, rewards are per-step based on closing links
 

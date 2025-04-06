@@ -53,24 +53,64 @@ class ReplayBuffer:
 
 
 class QNetwork(nn.Module):
-    """Simple MLP Q-Network."""
-    def __init__(self, state_dim, action_dim, hidden_dim=128):
+    """Enhanced MLP Q-Network for larger topologies."""
+    def __init__(self, state_dim, action_dim, hidden_dim=256):
         super(QNetwork, self).__init__()
+        # Use layer normalization instead of batch normalization
+        # Layer norm works fine with batch size of 1
         self.fc1 = nn.Linear(state_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, action_dim)
-
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.dropout1 = nn.Dropout(0.2)
+        
+        # Deeper architecture with multiple hidden layers
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim*2)  # Larger middle layer
+        self.ln2 = nn.LayerNorm(hidden_dim*2)
+        self.dropout2 = nn.Dropout(0.2)
+        
+        self.fc3 = nn.Linear(hidden_dim*2, hidden_dim)
+        self.ln3 = nn.LayerNorm(hidden_dim)
+        self.dropout3 = nn.Dropout(0.2)
+        
+        # Output layer
+        self.fc4 = nn.Linear(hidden_dim, action_dim)
+        
     def forward(self, state):
         """Build a network that maps state -> action values."""
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        # Convert to tensor if it's not already
+        if not isinstance(state, torch.Tensor):
+            state = torch.FloatTensor(state)
+            
+        # Check if we're dealing with a single state or a batch
+        if state.dim() == 1:
+            state = state.unsqueeze(0)  # Add batch dimension
+            is_single = True
+        else:
+            is_single = False
+            
+        # Apply layers with activations, layer norm, and dropout
+        x = F.relu(self.ln1(self.fc1(state)))
+        x = self.dropout1(x)
+        
+        x = F.relu(self.ln2(self.fc2(x)))
+        x = self.dropout2(x)
+        
+        x = F.relu(self.ln3(self.fc3(x)))
+        x = self.dropout3(x)
+        
+        # Output layer without activation (Q-values can be any real number)
+        x = self.fc4(x)
+        
+        # Remove batch dimension if input was a single state
+        if is_single:
+            x = x.squeeze(0)
+            
+        return x
 
 
 class DQN:
     """Deep Q-Network Agent."""
 
-    def __init__(self, state_dim, action_dim, hidden_dim=128, lr=1e-4, gamma=0.99, device='cpu'):
+    def __init__(self, state_dim, action_dim, hidden_dim=256, lr=5e-5, gamma=0.99, device='cpu'):
         """
         Initialize an Agent object.
 
