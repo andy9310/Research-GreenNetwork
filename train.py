@@ -25,6 +25,10 @@ parser = argparse.ArgumentParser(description='Train a DQN agent for network topo
 parser.add_argument('--config', type=str, default='config.json', help='Path to configuration JSON file')
 parser.add_argument('--gpu', action='store_true', help='Force using GPU if available')
 parser.add_argument('--gpu-device', type=int, default=0, help='GPU device index to use when multiple GPUs are available')
+parser.add_argument('--load-model', action='store_true', help='Load and continue training from an existing model')
+parser.add_argument('--tm-index', type=int, default=None, help='Start training from a specific traffic matrix index')
+parser.add_argument('--episodes', type=int, default=5000, help='Number of episodes to train per traffic matrix')
+parser.add_argument('--tm-subset', type=int, default=None, help='Use only a subset of traffic matrices (specify count)')
 args = parser.parse_args()
 
 # Load config from specified file
@@ -74,8 +78,8 @@ batch_size = 128  # Larger batch size for better training
 
 epsilon_start = 1.0
 epsilon_end = 0.05
-epsilon_decay_steps = 20000 # Adjust decay steps based on expected total steps
-target_update_freq = 1000  # Update target net less frequently (in steps)
+epsilon_decay_steps = 5000 # Adjust decay steps based on expected total steps
+target_update_freq = 500  # Update target net less frequently (in steps)
 
 # Device configuration
 if args.gpu and torch.cuda.is_available():
@@ -84,6 +88,8 @@ if args.gpu and torch.cuda.is_available():
     else:
         device = torch.device("cuda:0")
     torch.backends.cudnn.benchmark = True  # Optimize CUDNN
+    torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster computation
+    torch.backends.cudnn.allow_tf32 = True       # Allow TF32 for faster computation
     print(f"Using GPU: {torch.cuda.get_device_name(device)}")
     print(f"CUDA Memory Available: {torch.cuda.get_device_properties(device).total_memory / 1e9:.2f} GB")
 else:
@@ -94,29 +100,80 @@ else:
         print("Using CPU for training")
 
 
-agent = DQN(state_dim, action_dim, hidden_dim=hidden_dim, lr=learning_rate, gamma=gamma, device=device)
+# Initialize the DQN agent with a transformer-based network architecture
+agent = DQN(state_dim, action_dim, hidden_dim=hidden_dim, lr=learning_rate, gamma=gamma, device=device, 
+         network_type='transformer', nhead=4, num_layers=2)
+
+# Load pre-trained model if requested
+config_name = config_path.split('.')[0]  # Remove .json extension
+model_path = f"dqn_model_{config_name}.pth"
+if args.load_model:
+    print(f"Loading pre-trained model from {model_path}...")
+    try:
+        agent.qnetwork_local.load_state_dict(torch.load(model_path, map_location=device))
+        agent.update_target_network()  # Make sure target network is updated with loaded weights
+        print("Pre-trained model loaded successfully. Continuing training...")
+    except FileNotFoundError:
+        print(f"Warning: Model file {model_path} not found. Starting with a new model.")
+    except Exception as e:
+        print(f"Error loading model: {e}. Starting with a new model.")
+
 replay_buffer = ReplayBuffer(buffer_size)
 
 # --- Training Loop ---
-num_episodes_per_tm = 5000 # Episodes per traffic matrix
-total_num_episodes = len(tm_list) * num_episodes_per_tm
-epsilon = epsilon_start
+num_episodes_per_tm = args.episodes # Episodes per traffic matrix
 total_steps = 0
 episode_rewards = []
 tm_episode_rewards = []  # Track rewards for each traffic matrix
 print_interval = 100
 
-print(f"\nStarting Training on {len(tm_list)} traffic matrices, {num_episodes_per_tm} episodes each...")
+# Determine starting traffic matrix index
+start_tm_idx = 0
+if args.tm_index is not None:
+    if 0 <= args.tm_index < len(tm_list):
+        start_tm_idx = args.tm_index
+        print(f"Starting training from traffic matrix index {start_tm_idx}")
+    else:
+        print(f"Warning: Traffic matrix index {args.tm_index} is out of range (0-{len(tm_list)-1})")
+        print(f"Starting from the first traffic matrix")
+
+# Calculate total episodes based on starting matrix
+training_matrices = len(tm_list) - start_tm_idx
+total_num_episodes = training_matrices * num_episodes_per_tm
+
+print(f"\nStarting Training on {training_matrices} traffic matrices, {num_episodes_per_tm} episodes each...")
 
 # Create a progress bar for traffic matrices
 tm_progress = tqdm(total=total_num_episodes, desc="Total Training Progress")
 
+# Limit the number of traffic matrices if subset option is used
+training_tm_list = tm_list[start_tm_idx:]
+if args.tm_subset is not None and args.tm_subset > 0 and args.tm_subset < len(training_tm_list):
+    # Take a representative subset evenly distributed across the list
+    if args.tm_subset >= 3:
+        # Try to get representatives from start, middle, and end
+        indices = np.linspace(0, len(training_tm_list)-1, args.tm_subset, dtype=int)
+        training_tm_list = [training_tm_list[i] for i in indices]
+        print(f"Using {len(training_tm_list)} traffic matrices (subset) from indices: {indices}")
+    else:
+        training_tm_list = training_tm_list[:args.tm_subset]
+        print(f"Using first {len(training_tm_list)} traffic matrices")
+    
+    # Recalculate total episodes based on the subset
+    total_num_episodes = len(training_tm_list) * num_episodes_per_tm
+    tm_progress.total = total_num_episodes
+    tm_progress.refresh()
+
 # Train on each traffic matrix
-for tm_idx, traffic_matrix in enumerate(tm_list):
+for tm_idx, traffic_matrix in enumerate(training_tm_list):
     # Set this traffic matrix in the environment
     env.current_tm_idx = tm_idx
     
     print(f"\nTraining on traffic matrix {tm_idx+1}/{len(tm_list)}...")
+    
+    # Reset epsilon for each traffic matrix
+    epsilon = epsilon_start
+    tm_steps = 0
     
     # Reset episode rewards for this traffic matrix
     tm_episode_rewards = []
@@ -129,14 +186,17 @@ for tm_idx, traffic_matrix in enumerate(tm_list):
 
         while not done:
             total_steps += 1
+            tm_steps += 1
 
-            # Calculate current epsilon
-            # Linear decay: max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (total_steps / epsilon_decay_steps))
-            # Exponential decay: epsilon_end + (epsilon_start - epsilon_end) * np.exp(-1. * total_steps / epsilon_decay_steps)
-            epsilon = max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (total_steps / epsilon_decay_steps))
+            # Calculate current epsilon - reset for each traffic matrix
+            # Linear decay: max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (tm_steps / epsilon_decay_steps))
+            # Exponential decay: epsilon_end + (epsilon_start - epsilon_end) * np.exp(-1. * tm_steps / epsilon_decay_steps)
+            epsilon = max(epsilon_end, epsilon_start - (epsilon_start - epsilon_end) * (tm_steps / epsilon_decay_steps))
 
-            # Select action using epsilon-greedy (no mask needed for action_dim=2)
-            action = agent.select_action(state, epsilon)
+            # Use torch.no_grad() for action selection to reduce memory usage and speed up training
+            with torch.no_grad():
+                # Select action using epsilon-greedy (no mask needed for action_dim=2)
+                action = agent.select_action(state, epsilon)
 
             # Execute action in environment
             next_state, reward, done, info = env.step(action)

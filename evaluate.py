@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from env import NetworkEnv
-from agent import DQN, QNetwork # Import QNetwork too for model loading
+from agent import DQN, QNetwork, TransformerQNetwork # Import TransformerQNetwork for model loading
 import time
 import json # Import json
 import argparse # For command-line arguments
@@ -78,8 +78,8 @@ else:
     else:
         print("Using CPU for evaluation")
 
-# Initialize the QNetwork structure (needed to load state_dict)
-policy_net = QNetwork(state_dim, action_dim, hidden_dim).to(device)
+# Initialize the QNetwork structure with transformer architecture (needed to load state_dict)
+policy_net = TransformerQNetwork(state_dim, action_dim, hidden_dim=hidden_dim, nhead=4, num_layers=2).to(device)
 
 # --- Load Trained Model --- 
 # Use config name in the model filename to match the naming from training

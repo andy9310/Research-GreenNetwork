@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 from collections import deque, namedtuple
+import math
 
 # Experience tuple for Replay Buffer
 Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
@@ -107,10 +108,102 @@ class QNetwork(nn.Module):
         return x
 
 
+class TransformerQNetwork(nn.Module):
+    """Transformer-based Q-Network for network optimization tasks.
+    Leverages self-attention mechanisms to capture relationships between network elements.
+    """
+    def __init__(self, state_dim, action_dim, hidden_dim=256, nhead=4, num_layers=2, dropout=0.1):
+        super(TransformerQNetwork, self).__init__()
+        
+        # Input embedding layer to convert input features to hidden dimension
+        self.input_embedding = nn.Linear(1, hidden_dim)  # Each state element gets embedded
+        
+        # Positional encoding for transformer
+        self.pos_encoder = self.PositionalEncoding(hidden_dim, dropout)
+        
+        # Transformer encoder layers
+        encoder_layers = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim*2,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        
+        # Output projection layers
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        # Final output layer
+        self.output = nn.Linear(hidden_dim, action_dim)
+        
+    class PositionalEncoding(nn.Module):
+        """Positional encoding for the transformer model."""
+        def __init__(self, d_model, dropout=0.1, max_len=200):
+            super().__init__()
+            self.dropout = nn.Dropout(p=dropout)
+
+            position = torch.arange(max_len).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+            pe = torch.zeros(max_len, 1, d_model)
+            pe[:, 0, 0::2] = torch.sin(position * div_term)
+            pe[:, 0, 1::2] = torch.cos(position * div_term)
+            pe = pe.transpose(0, 1)  # [1, max_len, d_model]
+            self.register_buffer('pe', pe)
+
+        def forward(self, x):
+            """Add positional encoding to the input tensor."""
+            # x: [batch_size, seq_len, d_model]
+            x = x + self.pe[:, :x.size(1)]
+            return self.dropout(x)
+        
+    def forward(self, state):
+        """Process input state through transformer architecture."""
+        # Convert to tensor if it's not already
+        if not isinstance(state, torch.Tensor):
+            state = torch.FloatTensor(state)
+            
+        # Check if we're dealing with a single state or a batch
+        if state.dim() == 1:
+            state = state.unsqueeze(0)  # Add batch dimension
+            is_single = True
+        else:
+            is_single = False
+            
+        # Reshape to [batch_size, seq_len, 1] where seq_len = state_dim
+        x = state.unsqueeze(-1)  # Add feature dimension
+        batch_size, seq_len = x.shape[0], x.shape[1]
+        
+        # Input embedding [batch_size, seq_len, hidden_dim]
+        x = self.input_embedding(x)
+        
+        # Add positional encoding
+        x = self.pos_encoder(x)
+        
+        # Apply transformer encoder
+        x = self.transformer_encoder(x)
+        
+        # Global pooling across sequence dimension to get a single vector per batch item
+        x = x.mean(dim=1)  # [batch_size, hidden_dim]
+        
+        # Apply final layers
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = self.dropout1(x)
+        x = self.output(x)
+        
+        # Remove batch dimension if input was a single state
+        if is_single:
+            x = x.squeeze(0)
+            
+        return x
+
+
 class DQN:
     """Deep Q-Network Agent."""
 
-    def __init__(self, state_dim, action_dim, hidden_dim=256, lr=5e-5, gamma=0.99, device='cpu'):
+    def __init__(self, state_dim, action_dim, hidden_dim=256, lr=5e-5, gamma=0.99, device='cpu', network_type='mlp', nhead=4, num_layers=2):
         """
         Initialize an Agent object.
 
@@ -122,15 +215,30 @@ class DQN:
             lr (float): learning rate
             gamma (float): discount factor
             device (torch.device): device to use for tensors (cpu or cuda)
+            network_type (str): 'mlp' for standard QNetwork or 'transformer' for TransformerQNetwork
+            nhead (int): number of attention heads for transformer (only used if network_type='transformer')
+            num_layers (int): number of transformer layers (only used if network_type='transformer')
         """
         self.state_dim = state_dim
         self.action_dim = action_dim # Should be 2 (close/open)
         self.gamma = gamma
         self.device = device
+        self.network_type = network_type
 
-        # Q-Network
-        self.qnetwork_local = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
-        self.qnetwork_target = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
+        # Create appropriate Q-Network based on type
+        if network_type == 'transformer':
+            print(f"Using Transformer Q-Network with {nhead} attention heads and {num_layers} layers")
+            self.qnetwork_local = TransformerQNetwork(
+                state_dim, action_dim, hidden_dim, nhead=nhead, num_layers=num_layers
+            ).to(self.device)
+            self.qnetwork_target = TransformerQNetwork(
+                state_dim, action_dim, hidden_dim, nhead=nhead, num_layers=num_layers
+            ).to(self.device)
+        else:  # Default to MLP
+            print(f"Using Standard MLP Q-Network with hidden dim {hidden_dim}")
+            self.qnetwork_local = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
+            self.qnetwork_target = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
+
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=lr)
 
         # Initialize target network with local network's weights
@@ -212,5 +320,12 @@ lr = 1e-4
 gamma = 0.99
 device = 'cpu'
 
-qnetwork = QNetwork(state_dim, action_dim, hidden_dim)
-dqn = DQN(state_dim, action_dim, hidden_dim, lr, gamma, device)
+# Example of both network types
+qnetwork_mlp = QNetwork(state_dim, action_dim, hidden_dim)
+qnetwork_transformer = TransformerQNetwork(state_dim, action_dim, hidden_dim)
+
+# Default to MLP for the example
+dqn = DQN(state_dim, action_dim, hidden_dim, lr, gamma, device, network_type='mlp')
+
+# Uncomment to use transformer
+# dqn = DQN(state_dim, action_dim, hidden_dim, lr, gamma, device, network_type='transformer')
