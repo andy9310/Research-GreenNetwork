@@ -1,0 +1,63 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# PyTorch model checkpoints
+*.pth
+*.pt
+*.onnx
+*.h5
+*.pkl
+*.ckpt
+
+# Tensorboard logs
+runs/
+logs/
+events.out.tfevents*
+
+# Config backups
+config_backups/
+
+# Virtual environment
+venv/
+env/
+rl_hw3_new/
+.env/
+.venv/
+
+# Environment variables
+.env
+
+# IDE-specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+.ipynb_checkpoints/
+
+# Large data files and test results
+*.csv
+*.xlsx
+*.xls
+*.npz
+*.npy
+results/
+data/large_data/
+
+# Additional files that might be too large
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Specific large files in this project
+dqn_model_*.pth
