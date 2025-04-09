@@ -78,8 +78,8 @@ batch_size = 128  # Larger batch size for better training
 
 epsilon_start = 1.0
 epsilon_end = 0.05
-epsilon_decay_steps = 5000 # Adjust decay steps based on expected total steps
-target_update_freq = 500  # Update target net less frequently (in steps)
+epsilon_decay_steps = 20000 # Adjust decay steps based on expected total steps
+target_update_freq = 1000  # Update target net less frequently (in steps)
 
 # Device configuration
 if args.gpu and torch.cuda.is_available():
