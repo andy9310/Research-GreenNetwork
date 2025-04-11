@@ -7,6 +7,7 @@ import time
 from tqdm import tqdm
 import argparse
 import os
+import matplotlib.pyplot as plt
 
 # --- Print PyTorch info ---
 print(f"PyTorch version: {torch.__version__}")
@@ -65,6 +66,9 @@ env = NetworkEnv(
     seed=seed
 )
 
+# Ensure plots directory exists
+os.makedirs("plots", exist_ok=True)
+
 num_actual_edges = env.num_edges  # Actual edges in this specific config
 
 # --- Agent Setup ---
@@ -110,8 +114,8 @@ agent = SequentialDQNAgent(
     state_dim=state_dim,
     action_dim=action_dim,
     hidden_dim=hidden_dim,
-    nhead=4,
-    num_layers=3,
+    nhead=4,  # Number of attention heads
+    num_layers=3,  # Number of transformer layers
     dropout=0.1,
     sequence_length=sequence_length,
     prediction_horizon=prediction_horizon,
@@ -121,18 +125,13 @@ agent = SequentialDQNAgent(
 )
 
 # --- Create Replay Buffer ---
-replay_buffer = SequentialReplayBuffer(
-    buffer_size=buffer_size,
-    sequence_length=sequence_length,
-    batch_size=batch_size,
-    device=device
-)
+replay_buffer = SequentialReplayBuffer(buffer_size, sequence_length, batch_size, device)
 
 # --- Create Sequence Tracker ---
 sequence_tracker = SequenceTracker(sequence_length, state_dim)
 
 # --- Model Path ---
-config_name = config_path.split('.')[0]  # Remove .json extension
+config_name = os.path.basename(config_path).split('.')[0]  # Remove .json extension
 model_path = f"transformer_dqn_model_{config_name}.pth"
 
 # --- Load pre-trained model if requested ---
@@ -145,34 +144,34 @@ if args.load_model:
         print(f"Error loading model: {e}")
         print("Starting with a new model.")
 
-# --- Training Setup ---
-# Determine which traffic matrices to train on
-start_tm_idx = args.tm_index if args.tm_index is not None else 0
-print(f"Starting from traffic matrix index: {start_tm_idx}")
-
-# Optionally limit to a subset of traffic matrices
-training_tm_list = tm_list[start_tm_idx:]
-if args.tm_subset is not None and args.tm_subset > 0:
-    training_tm_list = training_tm_list[:min(args.tm_subset, len(training_tm_list))]
-    print(f"Using a subset of {len(training_tm_list)} traffic matrices")
-
-# Episodes per traffic matrix
-num_episodes_per_tm = args.episodes
-print(f"Training for {num_episodes_per_tm} episodes per traffic matrix")
-
-# Progress tracking
-episode_rewards = []
+# --- Initialize tracking variables ---
 total_steps = 0
-print_interval = 100
+episode_rewards = []
 
-# Calculate total episodes based on starting matrix
-training_matrices = len(training_tm_list)
+# Optional: start from specific traffic matrix
+start_tm_idx = args.tm_index if args.tm_index is not None else 0
+
+# Limit the number of traffic matrices used for training if specified
+if args.tm_subset is not None and args.tm_subset < len(tm_list):
+    training_tm_list = tm_list[start_tm_idx:start_tm_idx + args.tm_subset]
+    training_matrices = args.tm_subset
+else:
+    training_tm_list = tm_list[start_tm_idx:]
+    training_matrices = len(training_tm_list)
+    
+# Number of episodes per traffic matrix
+num_episodes_per_tm = args.episodes
+
+# Calculate total number of episodes for progress tracking
 total_num_episodes = training_matrices * num_episodes_per_tm
 
 print(f"\nStarting Training on {training_matrices} traffic matrices, {num_episodes_per_tm} episodes each...")
 
 # Create a progress bar for total training
 tm_progress = tqdm(total=total_num_episodes, desc="Total Training Progress")
+
+# Define print interval for logging (print progress every N episodes)
+print_interval = 100
 
 # --- Training Loop ---
 for tm_idx, traffic_matrix in enumerate(training_tm_list):
@@ -194,9 +193,11 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
         state, _ = env.reset()
         agent.reset()  # Reset agent's internal buffers
         sequence_tracker.reset()  # Reset sequence tracker
-        sequence_tracker.update(state)  # Add initial state
         
-        episode_reward = 0
+        # Initialize sequence tracker with the initial state
+        sequence_tracker.update(state)
+        
+        episode_reward = 0.0
         done = False
         
         # Print state shape information for debugging
@@ -218,27 +219,61 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
                 print(f"Step {step_count} - State shape: {np.array(state).shape}")
             
             try:
-                # Select action using epsilon-greedy
-                with torch.no_grad():
-                    action = agent.select_action(state, epsilon)
+                # Select action using epsilon-greedy with robust error handling
+                try:
+                    with torch.no_grad():
+                        action = agent.select_action(state, epsilon)
+                        
+                    # Validate action before passing to environment
+                    if isinstance(action, torch.Tensor):
+                        action = action.item()
                     
-                # Execute action in environment
-                next_state, reward, done, info = env.step(action)
+                    # Convert to int if it's a float
+                    if isinstance(action, float):
+                        action = int(action)
+                        
+                    # Verify if we're dealing with binary action space
+                    valid_actions = [0, 1] if env.action_space.n == 2 else list(range(env.action_space.n))
+                    
+                    # Ensure action is within bounds for this environment
+                    if action not in valid_actions:
+                        print(f"Warning: Invalid action {action}, defaulting to 0")
+                        action = 0
+                        
+                    # Execute action in environment with safe bounds checking
+                    try:
+                        next_state, reward, done, _, info = env.step(action)
+                    except IndexError as e:
+                        print(f"IndexError during environment step for action {action}: {str(e)}")
+                        # Fallback to a safe action
+                        action = 0
+                        next_state, reward, done, _, info = env.step(action)
+                except Exception as e:
+                    print(f"Error during action selection at step {step_count}: {str(e)}")
+                    # Default to action 0 if there's an error
+                    action = 0
+                    next_state, reward, done, _, info = env.step(action)
                 
-                # Update sequence tracker with new state and action
+                # Update sequence tracker with the new state and action
                 sequence_tracker.update(next_state, action)
                 
-                # Get updated sequences for replay buffer
-                next_state_seq = sequence_tracker.get_state_sequence()
-                action_seq = sequence_tracker.get_action_sequence()
-                
-                # Only store experiences with valid sequences
-                if action_seq is not None and len(action_seq) > 0:
-                    # Get current state sequence for storage
+                # Store transition in replay buffer if we have enough history
+                if step_count >= sequence_length - 1:
+                    # Get current sequences before the update
                     state_seq = sequence_tracker.get_state_sequence()
+                    action_seq = sequence_tracker.get_action_sequence()
                     
-                    # Store in replay buffer
-                    replay_buffer.push(state_seq, action_seq, reward, next_state_seq, done)
+                    # Create next state sequence by shifting window
+                    next_state_seq = np.copy(state_seq)
+                    if len(next_state_seq) > 0:
+                        # Shift sequence and add new state at the end
+                        next_state_seq = np.roll(next_state_seq, -1, axis=0)
+                        next_state_seq[-1] = next_state
+                    
+                    # Only store experiences with valid sequences
+                    if action_seq is not None and len(action_seq) > 0:
+                        # Store in replay buffer
+                        replay_buffer.push(state_seq, action_seq, reward, next_state_seq, done)
                 
                 # Move to the next state
                 state = next_state
@@ -255,7 +290,7 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
                 continue
             
             # Perform learning step if buffer has enough samples
-            if len(replay_buffer) > batch_size and step_count % 4 == 0:  # Learn every 4 steps
+            if len(replay_buffer) > batch_size and total_steps % 4 == 0:  # Learn every 4 steps
                 loss = agent.learn(replay_buffer, batch_size)
                 
             # Update target network periodically
@@ -300,13 +335,8 @@ print("\nTraining Statistics:")
 print(f"Total steps: {total_steps}")
 print(f"Final average reward (last {min(100, len(episode_rewards))} episodes): {np.mean(episode_rewards[-min(100, len(episode_rewards))]):0.2f}")
 
-# --- Plot Training Curve (if matplotlib available) ---
+# --- Plot Training Curve ---
 try:
-    import matplotlib.pyplot as plt
-    
-    # Create plots directory if it doesn't exist
-    os.makedirs("plots", exist_ok=True)
-    
     # Plot episode rewards
     plt.figure(figsize=(10, 6))
     plt.plot(np.arange(len(episode_rewards)), episode_rewards)
@@ -316,10 +346,11 @@ try:
     
     # Add smoothed moving average
     window_size = min(100, len(episode_rewards))
-    smoothed_rewards = np.convolve(episode_rewards, np.ones(window_size)/window_size, mode='valid')
-    plt.plot(np.arange(len(smoothed_rewards)) + window_size-1, smoothed_rewards, 'r-', linewidth=2)
+    if len(episode_rewards) >= window_size:
+        smoothed_rewards = np.convolve(episode_rewards, np.ones(window_size)/window_size, mode='valid')
+        plt.plot(np.arange(len(smoothed_rewards)) + window_size-1, smoothed_rewards, 'r-', linewidth=2)
     
     plt.savefig(f"plots/transformer_dqn_{config_name}_rewards.png")
     print(f"Training curve saved to plots/transformer_dqn_{config_name}_rewards.png")
-except ImportError:
-    print("Matplotlib not available. Skipping plot generation.")
+except Exception as e:
+    print(f"Error generating plot: {str(e)}")

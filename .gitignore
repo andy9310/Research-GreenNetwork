@@ -59,5 +59,8 @@ data/large_data/
 *.rar
 *.7z
 
-# Specific large files in this project
-dqn_model_*.pth
+# Trained model files (all architectures and configurations)
+dqn_*.pth
+models/*.pth
+**/models/*.pth
+**/*.pth
