@@ -88,7 +88,7 @@ batch_size = 256  # Larger batch size for better training og: 128
 
 epsilon_start = 1.0
 epsilon_end = 0.05
-epsilon_decay_steps = 10000 # Adjust decay steps based on expected total steps
+epsilon_decay_steps = 5000 # Adjust decay steps based on expected total steps
 target_update_freq = 1000  # Update target net less frequently (in steps)
 
 # Device configuration
@@ -289,11 +289,11 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
         # Print progress at intervals
         if (episode + 1) % print_interval == 0:
             avg_reward = np.mean(tm_episode_rewards[-min(print_interval, len(tm_episode_rewards)):]) 
-            avg_overall = np.mean(episode_rewards[-min(print_interval, len(episode_rewards)):])
+            max_reward = np.max(episode_rewards) if episode_rewards else 0
             
             # Print progress information
             tm_progress.write(f"TM {tm_idx+1}/{len(tm_list)}, Episode {episode + 1}/{num_episodes_per_tm}, "
-                             f"TM Avg Reward: {avg_reward:.2f}, Overall Avg: {avg_overall:.2f}, "
+                             f"TM Avg Reward: {avg_reward:.2f}, Max Reward: {max_reward:.2f}, "
                              f"Epsilon: {epsilon:.3f}, Total Steps: {total_steps}")
             
             # Additional verbose output
