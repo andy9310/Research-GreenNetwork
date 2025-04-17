@@ -1,0 +1,30 @@
+{
+  "0": {
+    "best_config": [
+      1,
+      1,
+      1,
+      0,
+      1,
+      0,
+      1,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      1,
+      0,
+      1
+    ],
+    "num_links_closed": 5,
+    "total_links": 20,
+    "best_score": 50.0,
+    "valid_configs_found": 131
+  }
+}

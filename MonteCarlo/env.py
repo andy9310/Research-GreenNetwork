@@ -54,37 +54,16 @@ class NetworkEnv(gym.Env):
         self.overloaded_penalty = 10
 
     def _get_observation(self):
-        """Constructs an improved observation vector that's more generalizable."""
-        # Calculate normalized usage-to-capacity ratio instead of raw usage
-        usage_to_capacity = np.zeros(self.num_edges, dtype=float)
-        for i in range(self.num_edges):
-            if self.link_open[i] == 1:  # Only for open links
-                u, v = self.edge_list[i]
-                capacity = self.graph[u][v]['capacity']
-                if capacity > 0:
-                    usage_to_capacity[i] = self.usage[i] / capacity  # Normalized [0-1+]
-        
-        # Pad arrays to fixed size
-        padded_link_open = np.pad(self.link_open, (0, self.max_edges - self.num_edges), 'constant', constant_values=0)
-        padded_usage_ratio = np.pad(usage_to_capacity, (0, self.max_edges - self.num_edges), 'constant', constant_values=0.0)
-        
-        # Include the current edge's local features
-        if self.current_edge_idx < self.num_edges:
-            current_edge = self.edge_list[self.current_edge_idx]
-            current_capacity = self.graph[current_edge[0]][current_edge[1]]['capacity']
-            current_usage = self.usage[self.current_edge_idx]
-            current_ratio = current_usage / current_capacity if current_capacity > 0 else 0
-        else:
-            current_ratio = 0
-            
-        # Create observation vector
+        """Constructs the observation vector, padded to max_edges."""
+        # Pad link_open and usage arrays
+        padded_link_open = np.pad(self.link_open, (0, self.max_edges - self.num_edges), 'constant', constant_values=0) # Pad with 0
+        padded_usage = np.pad(self.usage, (0, self.max_edges - self.num_edges), 'constant', constant_values=0.0)
+
         obs = np.concatenate([
             padded_link_open,
-            padded_usage_ratio,
-            [self.current_edge_idx / self.num_edges],  # Normalized index
-            [current_ratio]  # Current edge's usage ratio
+            padded_usage,
+            [self.current_edge_idx]
         ]).astype(np.float32)
-        
         return obs
 
     def _get_action_mask(self):
@@ -108,135 +87,47 @@ class NetworkEnv(gym.Env):
         self._update_link_usage() # Calculate initial usage
 
         obs = self._get_observation()
-        action_mask = self._get_action_mask()
-        info = {'action_mask': action_mask}
-        
-        # Return 5 values: observation, reward, done, truncated, info
-        return obs, 0, False, False, info
+        return obs, 0, False, False, {}  # obs, reward, done, truncated, info (gym interface)
 
     def step(self, action):
         """Executes one time step within the environment."""
+        assert self.action_space.contains(action), f"Invalid action {action}"
+        
+        # Apply the decision for the current link (0: close, 1: open)
+        self.link_open[self.current_edge_idx] = action
+        
+        # Calculate traffic flow after the decision
+        routing_successful, G_open = self._update_link_usage()
+        
+        # Calculate reward and check for violations
+        isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
+        
         reward = 0
-        done = False
-        info = {}
+        info = {'violation': None}
         
-        # Check if we've reached the end of the episode (all edges processed)
-        if self.current_edge_idx >= self.num_edges:
-            print(f"Warning: current_edge_idx {self.current_edge_idx} >= num_edges {self.num_edges}")
-            done = True
-            obs = self._get_observation()
-            action_mask = self._get_action_mask()
-            info = {'action_mask': action_mask, 'violation': 'episode_complete'}
-            # Return 5 values: observation, reward, done, truncated, info
-            return obs, reward, done, False, info
-
-        # Action should be 0 (close) or 1 (keep open)
-        if action not in [0, 1]:
-            print(f"Warning: Invalid action {action}. Must be 0 (close) or 1 (keep open). Defaulting to 1.")
-            action = 1  # Default to keeping the link open rather than raising an error
-
-        # Action 0 means try to close the current link, 1 means keep it open
-        chosen_action_for_current_edge = action  # 0=close, 1=keep open
-        edge_to_modify = self.current_edge_idx
+        # Penalize isolated nodes
+        if isolated:
+            reward -= self.isolated_penalty
+            info['violation'] = 'isolation'
         
-        # Additional safety check
-        if edge_to_modify >= len(self.link_open):
-            print(f"Error: edge_to_modify {edge_to_modify} >= link_open length {len(self.link_open)}")
-            done = True
-            obs = self._get_observation()
-            action_mask = self._get_action_mask()
-            info = {'action_mask': action_mask, 'violation': 'edge_index_out_of_bounds'}
-            # Return 5 values: observation, reward, done, truncated, info
-            return obs, -1, done, False, info
-
-        if chosen_action_for_current_edge == 0: # Try to close the link
-            # Tentatively close the link
-            original_state = self.link_open[edge_to_modify]
-            self.link_open[edge_to_modify] = 0
-
-            # Reroute traffic and check for violations
-            routing_successful, G_open = self._update_link_usage()
-            isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
-
-            if isolated or overloaded:
-                # Violation occurred - penalize and revert the change
-                self.link_open[edge_to_modify] = original_state # Revert
-                self._update_link_usage() # Recalculate usage with link open again
-                # Calculate negative reward for violations
-                reward = 0
-                if isolated:
-                    reward = -self.isolated_penalty
-                elif overloaded:
-                    reward = -self.overloaded_penalty * num_overloaded
-                info['violation'] = 'isolated' if isolated else 'overloaded'
-                done = True  # Terminate episode on violation
-            else:
-                # No violation - success! Keep link closed and give reward.
-                reward = self.energy_unit_reward
-                
-                # Add capacity utilization component to reward
-                capacity_utilization_reward = 0
-                open_edges = np.where(self.link_open == 1)[0]
-                if len(open_edges) > 0:
-                    util_sum = 0
-                    for edge_idx in open_edges:
-                        u, v = self.edge_list[edge_idx]
-                        capacity = self.graph[u][v]['capacity']
-                        if capacity > 0:
-                            edge_util = self.usage[edge_idx] / capacity
-                            # Reward balanced utilization (neither too low nor too high)
-                            # Optimal utilization around 0.6-0.7
-                            util_reward = -abs(edge_util - 0.65)
-                            util_sum += util_reward
-                    
-                    avg_util_reward = util_sum / len(open_edges)
-                    capacity_utilization_reward = avg_util_reward * 5  # Scale factor
-                
-                # Add utilization reward to total reward
-                reward += capacity_utilization_reward
-                info['violation'] = None
-        else: # Action 1: Keep the link open
-            # No change in link state, no energy reward, no penalty
-            self.link_open[edge_to_modify] = 1 # Ensure it stays open
-            reward = 0
-            
-            # Add capacity utilization component to reward
-            capacity_utilization_reward = 0
-            open_edges = np.where(self.link_open == 1)[0]
-            if len(open_edges) > 0:
-                util_sum = 0
-                for edge_idx in open_edges:
-                    u, v = self.edge_list[edge_idx]
-                    capacity = self.graph[u][v]['capacity']
-                    if capacity > 0:
-                        edge_util = self.usage[edge_idx] / capacity
-                        # Reward balanced utilization (neither too low nor too high)
-                        # Optimal utilization around 0.6-0.7
-                        util_reward = -abs(edge_util - 0.65)
-                        util_sum += util_reward
-                
-                avg_util_reward = util_sum / len(open_edges)
-                capacity_utilization_reward = avg_util_reward * 5  # Scale factor
-            
-            # Add utilization reward to total reward
-            reward += capacity_utilization_reward
-            info['violation'] = None
-            # No need to re-route if link state didn't change from open to open
-
-        # Move to the next edge decision
+        # Penalize overloaded links
+        if overloaded:
+            penalty = self.overloaded_penalty * num_overloaded
+            reward -= penalty
+            if not isolated:  # Only set if isolation isn't already the violation
+                info['violation'] = 'overload'
+        
+        # Reward for saving energy if no violations occur
+        if not isolated and not overloaded and action == 0:  # Closed a link successfully
+            reward += self.energy_unit_reward
+        
+        # Move to the next link for the next step
         self.current_edge_idx += 1
-
-        # --- Check if episode is done --- 
-        if self.current_edge_idx >= self.num_edges:
-            # reward += 10 # give a final reward
-            done = True
-            # No final reward, rewards are per-step based on closing links
-
+        done = self.current_edge_idx >= self.num_edges
+        
+        # Get the updated observation
         obs = self._get_observation()
-        action_mask = self._get_action_mask()
-        info['action_mask'] = action_mask # Add mask to info
-
-        # Return 5 values: observation, reward, done, truncated, info
+        
         return obs, reward, done, False, info
 
 

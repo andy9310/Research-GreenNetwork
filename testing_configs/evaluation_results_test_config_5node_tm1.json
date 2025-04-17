@@ -1,0 +1,14 @@
+{
+  "config": "test_config_5node.json",
+  "tm_index": 1,
+  "avg_reward": 0.0,
+  "std_reward": 0.0,
+  "episodes_with_violations": 0,
+  "avg_links_closed": 0.0,
+  "total_links": 8,
+  "isolation_violations": 0,
+  "overload_violations": 0,
+  "optimal_score": 30.0,
+  "optimal_links_closed": 3,
+  "relative_performance": 0.0
+}
