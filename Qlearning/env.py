@@ -173,28 +173,8 @@ class NetworkEnv(gym.Env):
             else:
                 # No violation - success! Keep link closed and give reward.
                 reward = self.energy_unit_reward
-                
-                # Add capacity utilization component to reward
-                capacity_utilization_reward = 0
-                open_edges = np.where(self.link_open == 1)[0]
-                if len(open_edges) > 0:
-                    util_sum = 0
-                    for edge_idx in open_edges:
-                        u, v = self.edge_list[edge_idx]
-                        capacity = self.graph[u][v]['capacity']
-                        if capacity > 0:
-                            edge_util = self.usage[edge_idx] / capacity
-                            # Reward balanced utilization (neither too low nor too high)
-                            # Optimal utilization around 0.6-0.7
-                            util_reward = -abs(edge_util - 0.65)
-                            util_sum += util_reward
-                    
-                    avg_util_reward = util_sum / len(open_edges)
-                    capacity_utilization_reward = avg_util_reward * 5  # Scale factor
-                
-                # Add utilization reward to total reward
-                reward += capacity_utilization_reward
-                info['violation'] = None
+                # Utilization reward removed as requested.
+
         else: # Action 1: Keep the link open
             # No change in link state, no energy reward, no penalty
             self.link_open[edge_to_modify] = 1 # Ensure it stays open
