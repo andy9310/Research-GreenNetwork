@@ -1,0 +1,48 @@
+{
+  "0": {
+    "best_config": [
+      1,
+      1,
+      1,
+      1,
+      0,
+      1,
+      1,
+      0
+    ],
+    "num_links_closed": 2,
+    "total_links": 8,
+    "best_score": 20.0,
+    "valid_configs_found": 5
+  },
+  "1": {
+    "best_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      0
+    ],
+    "num_links_closed": 1,
+    "total_links": 8,
+    "best_score": 10.0,
+    "valid_configs_found": 2
+  },
+  "2": {
+    "best_config": null,
+    "num_links_closed": 0,
+    "total_links": 8,
+    "best_score": 0,
+    "valid_configs_found": 0
+  },
+  "3": {
+    "best_config": null,
+    "num_links_closed": 0,
+    "total_links": 8,
+    "best_score": 0,
+    "valid_configs_found": 0
+  }
+}

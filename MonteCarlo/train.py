@@ -40,6 +40,9 @@ parser.add_argument('--tm-subset', type=int, default=None, help='Use only a subs
 parser.add_argument('--architecture', type=str, choices=['mlp', 'fat_mlp', 'transformer'], default='transformer', 
                    help='Neural network architecture to use: mlp (standard), fat_mlp (wider/deeper), or transformer')
 parser.add_argument('--hidden-dim', type=int, default=256, help='Hidden dimension size for the network')
+parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon value for exploration')
+parser.add_argument('--epsilon-min', type=float, default=0.05, help='Minimum epsilon value for exploration')
+parser.add_argument('--epsilon-decay-steps', type=int, default=10000, help='Number of steps for epsilon to decay from start to min')
 parser.add_argument('--verbose', action='store_true', help='Enable verbose output during training')
 args = parser.parse_args()
 
@@ -219,8 +222,8 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
             # Calculate epsilon based on cumulative steps
             agent.increment_step()  # Increment step counter
             epsilon = max(
-                0.05,  # Minimum epsilon
-                1.0 - (agent.total_steps / 10000)  # Linear decay
+                args.epsilon_min,  # Minimum epsilon
+                args.epsilon_start - (agent.total_steps / args.epsilon_decay_steps) * (args.epsilon_start - args.epsilon_min)  # Linear decay
             )
             
             # Select and execute action

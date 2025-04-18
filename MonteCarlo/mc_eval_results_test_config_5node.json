@@ -1,0 +1,202 @@
+{
+  "0": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "1": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "2": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "3": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "4": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "5": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "6": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "7": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "8": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  },
+  "9": {
+    "reward": 0.0,
+    "link_config": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "links_closed": 0,
+    "total_links": 8,
+    "violations": {
+      "isolation": 0,
+      "overload": 0
+    },
+    "steps": 8
+  }
+}

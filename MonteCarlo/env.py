@@ -102,31 +102,35 @@ class NetworkEnv(gym.Env):
         # Calculate reward and check for violations
         isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
         
+        # Get the updated observation
+        obs = self._get_observation()
+        
         reward = 0
         info = {'violation': None}
         
-        # Penalize isolated nodes
+        # Penalize isolated nodes and terminate episode immediately
         if isolated:
             reward -= self.isolated_penalty
             info['violation'] = 'isolation'
+            done = True  # Terminate episode due to critical violation
+            return obs, reward, done, False, info
         
-        # Penalize overloaded links
+        # Penalize overloaded links and terminate episode immediately
         if overloaded:
             penalty = self.overloaded_penalty * num_overloaded
             reward -= penalty
-            if not isolated:  # Only set if isolation isn't already the violation
-                info['violation'] = 'overload'
+            info['violation'] = 'overload'
+            info['num_overloaded'] = num_overloaded
+            done = True  # Terminate episode due to critical violation
+            return obs, reward, done, False, info
         
         # Reward for saving energy if no violations occur
-        if not isolated and not overloaded and action == 0:  # Closed a link successfully
+        if action == 0:  # Closed a link successfully
             reward += self.energy_unit_reward
         
         # Move to the next link for the next step
         self.current_edge_idx += 1
         done = self.current_edge_idx >= self.num_edges
-        
-        # Get the updated observation
-        obs = self._get_observation()
         
         return obs, reward, done, False, info
 

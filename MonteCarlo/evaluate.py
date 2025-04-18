@@ -5,7 +5,7 @@ from agent import MonteCarloAgent
 import json
 import argparse
 import os
-from tqdm import tqdm
+import time
 
 # --- Load topology configuration from JSON ---
 def load_config(config_path="config.json"):
@@ -24,10 +24,11 @@ parser = argparse.ArgumentParser(description='Evaluate a Monte Carlo agent for n
 parser.add_argument('--config', type=str, default='config_5node.json', help='Path to configuration JSON file')
 parser.add_argument('--gpu', action='store_true', help='Use GPU if available')
 parser.add_argument('--gpu-device', type=int, default=0, help='GPU device index to use')
-parser.add_argument('--episodes', type=int, default=100, help='Number of evaluation episodes')
+parser.add_argument('--tm-index', type=int, default=None, help='Index of traffic matrix to use (default: evaluate all)')
 parser.add_argument('--architecture', type=str, choices=['mlp', 'fat_mlp', 'transformer'], default='transformer', 
                    help='Neural network architecture to use: mlp (standard), fat_mlp (wider/deeper), or transformer')
 parser.add_argument('--hidden-dim', type=int, default=256, help='Hidden dimension size for the network')
+parser.add_argument('--model-path', type=str, default=None, help='Path to specific model to use (overrides auto detection)')
 parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
 args = parser.parse_args()
 
@@ -48,15 +49,35 @@ max_edges = config["max_edges"]
 print(f"Loaded configuration with {num_nodes} nodes and {len(edge_list)} edges")
 print(f"Number of traffic matrices: {len(tm_list)}")
 
-# --- Environment Instantiation ---
+# --- Environment Instantiation with Capacity Adjustment ---
 seed = 42  # For reproducibility
+
+# Function to compute adjusted capacity for traffic matrices with high demands
+def get_adjusted_capacity(traffic_matrix, edge_list, default_capacity):
+    """Calculate adjusted capacity for traffic matrices with high demands.
+    Uses the same logic as the bruteforce algorithm."""
+    tm = np.array(traffic_matrix)
+    total_traffic = np.sum(tm)
+    avg_traffic_per_edge = total_traffic / len(edge_list) * 2  # Conservative estimate
+    
+    if avg_traffic_per_edge > default_capacity:
+        suggested_capacity = int(avg_traffic_per_edge * 1.5)  # Add 50% margin
+        print(f"WARNING: Traffic matrix might require higher capacity.")
+        print(f"  - Current capacity: {default_capacity}")
+        print(f"  - Suggested minimum capacity: {suggested_capacity}")
+        print(f"  - Using adjusted capacity: {suggested_capacity}")
+        return suggested_capacity
+    else:
+        return default_capacity
+
+# Initialize environment with base capacity first
 env = NetworkEnv(
     adj_matrix=adj_matrix,
     edge_list=edge_list,
     tm_list=tm_list,
     node_props=node_props,
     num_nodes=num_nodes,
-    link_capacity=link_capacity,
+    link_capacity=link_capacity,  # Will be adjusted per traffic matrix as needed
     max_edges=max_edges,
     seed=seed
 )
@@ -89,14 +110,18 @@ agent = MonteCarloAgent(
 )
 
 # Load the trained model
-# Extract config name for model path
-if '/' in config_path:
-    config_file = config_path.split('/')[-1]
+if args.model_path:
+    # Use explicitly specified model path
+    model_path = args.model_path
 else:
-    config_file = config_path.split('\\')[-1] if '\\' in config_path else config_path
-
-config_name = config_file.split('.')[0]  # Remove .json extension
-model_path = f"models/monte_carlo_{args.architecture}_{config_name}.pth"
+    # Auto-detect model path based on config name
+    if '/' in config_path:
+        config_file = config_path.split('/')[-1]
+    else:
+        config_file = config_path.split('\\')[-1] if '\\' in config_path else config_path
+    
+    config_name = config_file.split('.')[0]  # Remove .json extension
+    model_path = f"models/monte_carlo_{args.architecture}_{config_name}.pth"
 
 if os.path.exists(model_path):
     print(f"Loading model from {model_path}")
@@ -104,80 +129,90 @@ if os.path.exists(model_path):
 else:
     print(f"Model not found at {model_path}. Evaluating with untrained model.")
 
-# Evaluation
-print(f"\nEvaluating model for {args.episodes} episodes per traffic matrix...")
+# Set the seed for reproducibility
+eval_seed = int(time.time())
+# Note: NetworkEnv doesn't have a direct seed method, seed is set during initialization
 
-# Track metrics
-all_rewards = []
-all_open_links = []
-all_violations = []
+# Determine which traffic matrices to evaluate
+tm_indices = [args.tm_index] if args.tm_index is not None else range(len(tm_list))
+
+print(f"\nEvaluating model on {len(tm_indices)} traffic matrices...")
+
+# Results storage
+results = {}
 
 # Evaluate on each traffic matrix
-for tm_idx, _ in enumerate(tm_list):
-    env.current_tm_idx = tm_idx
+for index in tm_indices:
+    if index < 0 or index >= len(tm_list):
+        print(f"Error: Traffic matrix index {index} is out of range (0-{len(tm_list)-1})")
+        continue
     
-    tm_rewards = []
-    tm_open_links = []
-    tm_violations = []
+    # Adjust capacity for this traffic matrix if needed
+    adjusted_capacity = get_adjusted_capacity(tm_list[index], edge_list, link_capacity)
     
-    print(f"\nEvaluating on traffic matrix {tm_idx+1}/{len(tm_list)}")
-    
-    # Run evaluation episodes
-    for episode in tqdm(range(args.episodes), desc=f"TM {tm_idx+1}"):
-        state, _, _, _, _ = env.reset()
-        episode_reward = 0
-        done = False
-        violations = {'isolation': 0, 'overload': 0}
+    # Update environment's link capacity
+    for i, (u, v) in enumerate(env.edge_list):
+        env.graph[u][v]['capacity'] = adjusted_capacity
         
-        while not done:
-            # Select action (no exploration)
-            with torch.no_grad():
-                action = agent.select_action(state, epsilon=0)
-            
-            # Execute action
-            next_state, reward, done, _, info = env.step(action)
-            
-            # Track reward and violations
-            episode_reward += reward
-            if info.get('violation'):
-                violations[info['violation']] += 1
-            
-            # Move to next state
-            state = next_state
-        
-        # Record episode metrics
-        tm_rewards.append(episode_reward)
-        
-        # Count open links at the end of the episode
-        open_links = np.sum(env.link_open)
-        tm_open_links.append(open_links)
-        
-        # Count total violations
-        total_violations = sum(violations.values())
-        tm_violations.append(total_violations)
+    env.current_tm_idx = index
     
-    # Calculate statistics for this traffic matrix
-    avg_reward = np.mean(tm_rewards)
-    avg_open_links = np.mean(tm_open_links)
-    avg_violations = np.mean(tm_violations)
+    print(f"\n--- Evaluating on Traffic Matrix {index+1}/{len(tm_list)} ---")
+    print(f"  Using capacity: {adjusted_capacity}")
     
-    print(f"  Avg Reward: {avg_reward:.2f}")
-    print(f"  Avg Open Links: {avg_open_links:.2f}/{env.num_edges} ({avg_open_links/env.num_edges*100:.1f}%)")
-    print(f"  Avg Violations: {avg_violations:.2f}")
+    # Single evaluation run
+    state, _, _, _, _ = env.reset()
+    episode_reward = 0
+    done = False
+    step = 0
+    violations = {'isolation': 0, 'overload': 0}
     
-    # Add to overall metrics
-    all_rewards.extend(tm_rewards)
-    all_open_links.extend(tm_open_links)
-    all_violations.extend(tm_violations)
+    while not done:
+        step += 1
+        # Select action (no exploration)
+        with torch.no_grad():
+            action = agent.select_action(state, epsilon=0)
+        
+        # Execute action
+        next_state, reward, done, _, info = env.step(action)
+        
+        # Track reward and violations
+        episode_reward += reward
+        if info.get('violation') == 'isolation':
+            violations['isolation'] += 1
+        elif info.get('violation') == 'overload':
+            violations['overload'] += info.get('num_overloaded', 1)
+        
+        # Move to next state
+        state = next_state
+    
+    # Store results for this traffic matrix
+    open_links = np.sum(env.link_open)
+    closed_links = env.num_edges - open_links
+    total_violations = sum(violations.values())
+    
+    # Print detailed results for this traffic matrix
+    print(f"  Final Reward: {episode_reward:.2f}")
+    print(f"  Links Closed: {closed_links}/{env.num_edges} ({closed_links/env.num_edges*100:.1f}%)")
+    print(f"  Link Configuration: {env.link_open}")
+    print(f"  Violations: {violations}")
+    
+    # Save results
+    results[index] = {
+        "reward": float(episode_reward),
+        "link_config": env.link_open.tolist(),
+        "links_closed": int(closed_links),
+        "total_links": int(env.num_edges),
+        "violations": violations,
+        "steps": step
+    }
+    
+    # No need for statistics since we're only running once
 
-# Calculate overall statistics
-overall_avg_reward = np.mean(all_rewards)
-overall_avg_open_links = np.mean(all_open_links)
-overall_avg_violations = np.mean(all_violations)
+# Save results to file
+config_basename = os.path.basename(config_path).replace('.json', '')
+results_file = f"mc_eval_results_{config_basename}.json"
+with open(results_file, 'w') as f:
+    json.dump(results, f, indent=2)
 
-print("\nOverall Evaluation Results:")
-print(f"  Overall Avg Reward: {overall_avg_reward:.2f}")
-print(f"  Overall Avg Open Links: {overall_avg_open_links:.2f}/{env.num_edges} ({overall_avg_open_links/env.num_edges*100:.1f}%)")
-print(f"  Overall Avg Violations: {overall_avg_violations:.2f}")
-
+print(f"\nResults saved to {results_file}")
 print("\nEvaluation complete.")
