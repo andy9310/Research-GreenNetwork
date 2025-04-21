@@ -1,10 +1,23 @@
 import torch
 import numpy as np
+import os
+import matplotlib.pyplot as plt
 from env import NetworkEnv
 from agent import DQN, QNetwork, TransformerQNetwork # Import TransformerQNetwork for model loading
 import time
 import json # Import json
 import argparse # For command-line arguments
+from collections import Counter # For counting configurations
+import logging 
+from visualization_utils import visualize_network_decisions, visualize_traffic_matrix, visualize_evaluation_results
+
+
+logging.basicConfig(
+    level=logging.DEBUG if __debug__ else logging.INFO,
+    # ↑ Python 以 -O(Optimize) 執行時 __debug__ 變 False → 自動調整等級
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger(__name__)  # 建立模組專屬 logger
 
 # --- Load Configuration from JSON ---
 def load_config(config_path="config.json"):
@@ -15,9 +28,12 @@ def load_config(config_path="config.json"):
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Evaluate a trained DQN agent for network topology optimization')
 parser.add_argument('--config', type=str, default='config.json', help='Path to configuration JSON file')
-parser.add_argument('--tm-index', type=int, default=0, help='Index of traffic matrix to use from tm_list (default: 0)')
+parser.add_argument('--tm-index', type=int, default=None, help='Index of traffic matrix to use from tm_list (if None, evaluates all)')
 parser.add_argument('--gpu', action='store_true', help='Force using GPU if available')
 parser.add_argument('--gpu-device', type=int, default=0, help='GPU device index to use when multiple GPUs are available')
+parser.add_argument('--architecture', type=str, choices=['mlp', 'fat_mlp', 'transformer'], default='mlp', help='Network architecture for evaluation')
+parser.add_argument('--visualize', action='store_true', help='Generate visualizations of model decisions')
+parser.add_argument('--save-dir', type=str, default='visualizations', help='Directory to save visualizations')
 args = parser.parse_args()
 
 # Load config from specified file
@@ -37,8 +53,10 @@ max_edges = config["max_edges"] # Load max_edges
 # Use a different seed for evaluation if desired
 eval_seed = int(time.time())
     
-# Ensure only the first traffic matrix is used for evaluation
-# This will ensure consistent evaluation even if multiple matrices are in the config
+# Create visualization directory if needed
+if args.visualize:
+    os.makedirs(args.save_dir, exist_ok=True)
+    print(f"Visualizations will be saved to {args.save_dir}/")
 env = NetworkEnv(
     adj_matrix=adj_matrix,
     edge_list=edge_list,
@@ -78,13 +96,34 @@ else:
     else:
         print("Using CPU for evaluation")
 
-# Initialize the QNetwork structure with transformer architecture (needed to load state_dict)
-policy_net = TransformerQNetwork(state_dim, action_dim, hidden_dim=hidden_dim, nhead=4, num_layers=2).to(device)
+# Initialize the QNetwork structure based on selected architecture
+if args.architecture == 'mlp':
+    policy_net = QNetwork(state_dim, action_dim, hidden_dim=hidden_dim).to(device)
+    print(f"Using Standard MLP Q-Network with hidden dim {hidden_dim}")
+elif args.architecture == 'fat_mlp':
+    # Fat MLP uses bigger hidden dimensions
+    fat_hidden_dim = hidden_dim * 4  # Typically 4x larger
+    policy_net = QNetwork(state_dim, action_dim, hidden_dim=fat_hidden_dim).to(device)
+    print(f"Using Fat MLP Q-Network with hidden dim {fat_hidden_dim}")
+else:
+    policy_net = TransformerQNetwork(state_dim, action_dim, hidden_dim=hidden_dim, nhead=4, num_layers=2).to(device)
+    print(f"Using Transformer Q-Network with hidden dim {hidden_dim}")
 
 # --- Load Trained Model --- 
 # Use config name in the model filename to match the naming from training
-config_name = config_path.split('.')[0]  # Remove .json extension
-model_load_path = f"dqn_model_{config_name}.pth"
+config_name = os.path.basename(config_path).split('.')[0]  # Extract base name without extension
+
+# Build model path based on architecture - match train.py's path convention
+if args.architecture == 'mlp':
+    # model_load_path = f"models/dqn_mlp_{config_name}.pth"
+    model_load_path = f"models/dqn_mlp_config_5node.pth"
+elif args.architecture == 'fat_mlp':
+    model_load_path = f"models/dqn_fat_mlp_{config_name}.pth"
+elif args.architecture == 'transformer':
+    model_load_path = f"models/dqn_transformer_{config_name}.pth"
+else:
+    # Generic fallback
+    model_load_path = f"models/dqn_model_{config_name}.pth"
 print(f"\nLoading trained model from {model_load_path}...")
 try:
     policy_net.load_state_dict(torch.load(model_load_path, map_location=device))
@@ -101,32 +140,36 @@ except RuntimeError as e:
     print("Ensure max_edges in config.json is the same as during training.")
     exit()
 
-# Set the specified traffic matrix index
-tm_index = args.tm_index
+# Determine which traffic matrices to evaluate
+if args.tm_index is not None:
+    tm_indices = [args.tm_index]
+    if args.tm_index >= len(tm_list):
+        print(f"Warning: TM index {args.tm_index} out of range. Using the last available TM.")
+        tm_indices = [len(tm_list) - 1]
+    print(f"Evaluating only on traffic matrix index {tm_indices[0]}")
+else:
+    tm_indices = list(range(len(tm_list)))
+    print(f"Evaluating on all {len(tm_indices)} traffic matrices")
 
-# Validate the tm_index
-if tm_index < 0 or tm_index >= len(tm_list):
-    print(f"Error: Traffic matrix index {tm_index} is out of range (0-{len(tm_list)-1})")
-    print(f"Defaulting to index 0")
-    tm_index = 0
-
-env.current_tm_idx = tm_index
-print(f"Evaluating using traffic matrix index {tm_index} (of {len(tm_list)} matrices)")
-
-# --- Evaluation Loop --- 
-num_eval_episodes = 5 # Evaluate over a few episodes for stability
-total_rewards = []
-final_link_configs = []
-violations_occurred = []
-
-print(f"\nRunning evaluation for {num_eval_episodes} episodes...")
-for episode in range(num_eval_episodes):
-    state, info = env.reset() # Reset now returns (obs, info)
+# --- Process each traffic matrix ---
+all_tm_results = []
+for tm_idx in tm_indices:
+    print(f"\n--- Evaluating Traffic Matrix {tm_idx} ---")
+    env.current_tm_idx = tm_idx
+    current_tm = np.array(tm_list[tm_idx])
+    
+    # --- Run a single episode for this traffic matrix ---
+    state, _, _, _, info = env.reset() # Env reset returns (obs, reward, done, truncated, info)
     episode_reward = 0
     done = False
     step = 0
     episode_violations = {'isolated': 0, 'overloaded': 0}
-
+    
+    # Track action history for visualization
+    action_history = []
+    state_history = [state.copy()]
+    link_utilization = None
+    
     while not done:
         step += 1
         # Select action greedily (epsilon=0.0) using the loaded policy net
@@ -134,53 +177,183 @@ for episode in range(num_eval_episodes):
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
             q_values = policy_net(state_tensor)
             action = q_values.argmax(dim=1).item()
-
+        
+        # Record action
+        action_history.append(action)
+        
         # Execute action in environment
-        next_state, reward, done, info = env.step(action)
-
+        next_state, reward, done, truncated, info = env.step(action)
+        
+        # Record state
+        state_history.append(next_state.copy())
+        
+        # Update running values
         episode_reward += reward
         state = next_state
-
+        
         # Track violations if they occur
         if info.get('violation') == 'isolated':
             episode_violations['isolated'] += 1
         elif info.get('violation') == 'overloaded':
-             episode_violations['overloaded'] += info.get('num_overloaded', 1)
+            episode_violations['overloaded'] += info.get('num_overloaded', 1)
+            
+        # Get link utilization for visualization
+        if 'link_utilization' in info:
+            link_utilization = info['link_utilization']
+        
+        # Log violations
+        if info.get('violation'):
+            log.debug(f"TM {tm_idx}, Step {step}, Violation: {info.get('violation')}, Reward: {reward}")
+    
+    # Calculate final configuration
+    final_config = env.link_open.copy()
+    num_closed = sum(1 for link in final_config if link == 0)
+    
+    # If link utilization not in info, calculate it
+    if link_utilization is None:
+        # We need to compute the link utilization based on final config
+        link_utilization = env.get_link_utilization()
+    
+    # Print summary for this traffic matrix
+    print(f"Traffic Matrix {tm_idx}: Reward={episode_reward:.2f}, Links Closed={num_closed}/{env.num_edges}")
+    print(f"Violations: {episode_violations}")
+    
+    # Store results for this traffic matrix
+    tm_result = {
+        'tm_idx': tm_idx,
+        'reward': episode_reward,
+        'final_config': final_config,
+        'link_utilization': link_utilization,
+        'violations': episode_violations,
+        'num_closed': num_closed
+    }
+    all_tm_results.append(tm_result)
+    
+    # Generate visualization if requested
+    if args.visualize:
+        model_name = f"DQN_{args.architecture}"
+        output_path = os.path.join(args.save_dir, f"{model_name}_tm{tm_idx}.png")
+        
+        # Create visualization
+        fig = plt.figure(figsize=(18, 12))
+        plt.subplots_adjust(wspace=0.3, hspace=0.3)
+        
+        # Traffic Matrix plot
+        ax1 = plt.subplot2grid((2, 3), (0, 0), colspan=1, rowspan=1)
+        visualize_traffic_matrix(current_tm, title=f"Traffic Matrix {tm_idx}")
+        
+        # Network plot
+        ax2 = plt.subplot2grid((2, 3), (0, 1), colspan=2, rowspan=2)
+        
+        # Identify violated links
+        violated_links = []
+        for i, util in enumerate(link_utilization):
+            if util > 1.0 and final_config[i] == 1:  # Open link that's overloaded
+                violated_links.append(i)
+        
+        # Create network visualization title
+        title = f"{model_name} - Traffic Matrix {tm_idx} - Reward: {episode_reward:.2f}"
+        if episode_violations.get('overloaded', 0) > 0:
+            title += f" - {episode_violations['overloaded']} Overloaded"
+        if episode_violations.get('isolated', 0) > 0:
+            title += f" - {episode_violations['isolated']} Isolated"
+        
+        # Draw network visualization
+        visualize_network_decisions(
+            edge_list=edge_list,
+            link_open=final_config,
+            link_utilization=link_utilization,
+            violated_links=violated_links,
+            title=title
+        )
+        
+        # Link utilization plot
+        ax3 = plt.subplot2grid((2, 3), (1, 0), colspan=1, rowspan=1)
+        
+        # Filter to only show open links
+        open_links = [i for i, is_open in enumerate(final_config) if is_open == 1]
+        if open_links:  # Only if there are open links
+            open_link_utils = [link_utilization[i] for i in open_links]
+            open_link_labels = [f"{edge_list[i][0]}->{edge_list[i][1]}" for i in open_links]
+            
+            # Sort by utilization
+            sorted_indices = np.argsort(open_link_utils)
+            sorted_utils = [open_link_utils[i] for i in sorted_indices]
+            sorted_labels = [open_link_labels[i] for i in sorted_indices]
+            
+            # Use color mapping based on utilization
+            colors = plt.cm.RdYlGn_r(np.array(sorted_utils))
+            
+            # Create horizontal bar chart
+            bars = ax3.barh(range(len(sorted_utils)), sorted_utils, color=colors)
+            ax3.set_title("Link Utilization (Open Links)")
+            ax3.set_xlabel("Utilization")
+            ax3.axvline(x=1.0, color='red', linestyle='--', label="Capacity Threshold")
+            ax3.set_yticks(range(len(sorted_labels)))
+            ax3.set_yticklabels(sorted_labels)
+            ax3.legend()
+        else:
+            ax3.set_title("No Open Links")
+        
+        # Add metadata text
+        metadata_text = (
+            f"Model: {model_name}\n"
+            f"Traffic Matrix: {tm_idx}\n"
+            f"Final Reward: {episode_reward:.2f}\n"
+            f"Links Closed: {num_closed}/{env.num_edges}\n"
+            f"Overload Violations: {episode_violations.get('overloaded', 0)}\n"
+            f"Isolation Violations: {episode_violations.get('isolated', 0)}"
+        )
+        
+        # Add text box with metadata
+        fig.text(0.02, 0.02, metadata_text, fontsize=10,
+                bbox=dict(facecolor='white', alpha=0.8))
+        
+        # Save figure
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+        print(f"Visualization saved to {output_path}")
 
-        if done:
-            total_rewards.append(episode_reward)
-            final_link_configs.append(env.link_open.copy()) # Store copy of final state
-            violations_occurred.append(episode_violations)
-            # Count how many interfaces were closed
-            num_closed = sum(1 for link in env.link_open if link == 0)
-            print(f" Episode {episode + 1}: Reward={episode_reward:.2f}, Links Closed={num_closed}/{env.num_edges}, Violations={episode_violations}")
-            break
-        # Optional: Add max steps per episode safeguard
-        # if step > env.num_edges * 2: # Example safeguard
-        #     print(f" Episode {episode + 1}: Exceeded max steps, terminating early.")
-        #     break
-
-# --- Report Results --- 
-print("\n--- Evaluation Summary ---")
-if total_rewards:
-    avg_reward = np.mean(total_rewards)
-    std_reward = np.std(total_rewards)
-    print(f" Average Reward: {avg_reward:.2f} +/- {std_reward:.2f}")
-
-    # Analyze final configurations (e.g., show the most common one)
-    # Convert configurations to tuples for easier comparison/counting
-    config_tuples = [tuple(cfg) for cfg in final_link_configs]
-    if config_tuples:
-        from collections import Counter
-        most_common_config, count = Counter(config_tuples).most_common(1)[0]
-        print(f" Most Common Final Configuration ({count}/{num_eval_episodes} times): {np.array(most_common_config)}")
-
-    # Summarize violations
-    total_iso = sum(v['isolated'] for v in violations_occurred)
-    total_ovl = sum(v['overloaded'] for v in violations_occurred)
-    episodes_with_violations = sum(1 for v in violations_occurred if v['isolated'] > 0 or v['overloaded'] > 0)
-    print(f" Total Isolation Violations across episodes: {total_iso}")
-    print(f" Total Overload Violations across episodes: {total_ovl}")
-    print(f" Episodes with any violation: {episodes_with_violations}/{num_eval_episodes}")
+# --- Report Overall Results --- 
+print("\n=== Overall Evaluation Summary ===\n")
+if all_tm_results:
+    # Compile aggregated statistics
+    avg_reward = np.mean([r['reward'] for r in all_tm_results])
+    avg_closed = np.mean([r['num_closed'] for r in all_tm_results])
+    tm_with_violations = sum(1 for r in all_tm_results if r['violations']['isolated'] > 0 or r['violations']['overloaded'] > 0)
+    total_isolated = sum(r['violations']['isolated'] for r in all_tm_results)
+    total_overloaded = sum(r['violations']['overloaded'] for r in all_tm_results)
+    
+    # Print summary
+    print(f"Evaluated on {len(all_tm_results)} traffic matrices")
+    print(f"Average Reward: {avg_reward:.2f}")
+    print(f"Average Links Closed: {avg_closed:.2f}/{env.num_edges}")
+    print(f"Traffic Matrices with Violations: {tm_with_violations}/{len(all_tm_results)}")
+    print(f"Total Isolation Violations: {total_isolated}")
+    print(f"Total Overload Violations: {total_overloaded}")
+    
+    # Print individual TM results
+    print("\nResults by Traffic Matrix:")
+    for result in all_tm_results:
+        tm_idx = result['tm_idx']
+        reward = result['reward']
+        num_closed = result['num_closed']
+        violations = result['violations']
+        has_violation = violations['isolated'] > 0 or violations['overloaded'] > 0
+        
+        status = "❌ (Violation)" if has_violation else "✅ (Valid)"
+        print(f"TM {tm_idx}: Reward={reward:.2f}, Closed={num_closed}/{env.num_edges}, Status={status}")
+        
+        if has_violation:
+            violation_details = []
+            if violations['isolated'] > 0:
+                violation_details.append(f"{violations['isolated']} isolated")
+            if violations['overloaded'] > 0:
+                violation_details.append(f"{violations['overloaded']} overloaded")
+            print(f"  Violations: {', '.join(violation_details)}")
+    
+    if args.visualize:
+        print(f"\nVisualizations saved to {args.save_dir}/")
 else:
-    print("No episodes completed successfully.")
+    print("No traffic matrices were evaluated successfully.")

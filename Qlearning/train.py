@@ -39,6 +39,7 @@ parser.add_argument('--architecture', type=str, choices=['mlp', 'fat_mlp', 'tran
                    help='Neural network architecture to use: mlp (standard), fat_mlp (wider/deeper), or transformer')
 parser.add_argument('--hidden-dim', type=int, default=256, help='Hidden dimension size for the network')
 parser.add_argument('--verbose', action='store_true', help='Enable verbose output during training')
+parser.add_argument('--random-edge-order', action='store_true', help='Randomize the order of edges for each episode')
 args = parser.parse_args()
 
 # Load config from specified file
@@ -65,7 +66,8 @@ env = NetworkEnv(
     num_nodes=num_nodes,
     link_capacity=link_capacity,
     max_edges=max_edges, # Pass max_edges to env
-    seed=seed
+    seed=seed,
+    random_edge_order=args.random_edge_order  # Pass random_edge_order flag
 )
 
 num_actual_edges = env.num_edges # Actual edges in this specific config
@@ -289,7 +291,7 @@ for tm_idx, traffic_matrix in enumerate(training_tm_list):
         # Print progress at intervals
         if (episode + 1) % print_interval == 0:
             avg_reward = np.mean(tm_episode_rewards[-min(print_interval, len(tm_episode_rewards)):]) 
-            max_reward = np.max(episode_rewards) if episode_rewards else 0
+            max_reward = np.max(tm_episode_rewards) if tm_episode_rewards else 0
             
             # Print progress information
             tm_progress.write(f"TM {tm_idx+1}/{len(tm_list)}, Episode {episode + 1}/{num_episodes_per_tm}, "
@@ -326,3 +328,23 @@ os.makedirs("models", exist_ok=True)
 print(f"Saving trained model to {model_save_path}...")
 torch.save(agent.qnetwork_local.state_dict(), model_save_path)
 print("Model saved.")
+
+# --- Save Edge Importance Analysis ---
+# Create directory for edge importance data
+os.makedirs("edge_importance", exist_ok=True)
+
+# Generate filepath based on config and architecture
+edge_importance_path = f"edge_importance/edge_imp_{args.architecture}_{config_name}_random{args.random_edge_order}.json"
+
+# Save edge importance data
+edge_imp_file = env.save_edge_importance_data(edge_importance_path)
+print(f"\nEdge importance analysis saved to {edge_imp_file}")
+print(f"This data shows which edges were most important for reward and violations.")
+
+# Print summary of random edge order experiment if used
+if args.random_edge_order:
+    print("\nRandom edge order was enabled during training.")
+    print("This helps identify true edge importance independent of processing order.")
+else:
+    print("\nFixed edge order was used during training.")
+    print("You can try --random-edge-order to analyze edge importance more thoroughly.")

@@ -7,7 +7,7 @@ from gymnasium import spaces
 class NetworkEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, adj_matrix, edge_list, tm_list, node_props, num_nodes, link_capacity, seed=None, max_edges=10):
+    def __init__(self, adj_matrix, edge_list, tm_list, node_props, num_nodes, link_capacity, seed=None, max_edges=10, random_edge_order=False):
         super(NetworkEnv, self).__init__()
         np.random.seed(seed)
         random.seed(seed)
@@ -20,6 +20,17 @@ class NetworkEnv(gym.Env):
         self.link_capacity = link_capacity
         self.num_edges = len(self.edge_list)
         self.max_edges = max_edges # Maximum possible edges
+        self.random_edge_order = random_edge_order
+        
+        # For tracking edge importance (contribution to reward and violations)
+        self.edge_rewards = np.zeros(self.num_edges, dtype=float)  # Rewards per edge
+        self.edge_violations = {"isolation": np.zeros(self.num_edges, dtype=int),
+                               "overloaded": np.zeros(self.num_edges, dtype=int)}
+        self.edge_decisions = {"open": np.zeros(self.num_edges, dtype=int),
+                              "close_success": np.zeros(self.num_edges, dtype=int),
+                              "close_failure": np.zeros(self.num_edges, dtype=int)}
+        self.edge_perm = np.arange(self.num_edges)  # Identity permutation by default
+        self.inv_edge_perm = np.arange(self.num_edges)
 
         if self.num_edges > self.max_edges:
              raise ValueError(f"Number of edges ({self.num_edges}) exceeds max_edges ({self.max_edges})")
@@ -35,10 +46,10 @@ class NetworkEnv(gym.Env):
         # Action: Decide whether to close (0) or keep open (1) the current link
         self.action_space = spaces.Discrete(2)
 
-        # Observation: [link_open_status (max_edges), link_usage (max_edges), current_edge_idx (1)]
+        # Observation: [link_open_status (max_edges), link_usage (max_edges), current_edge_idx (1), current_usage_ratio (1)]
         # Pad with a distinct value, e.g., -1, if needed, or use masking carefully.
         # Here we assume 0 padding is acceptable for link status/usage.
-        obs_dim = self.max_edges + self.max_edges + 1
+        obs_dim = self.max_edges + self.max_edges + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # Environment state variables
@@ -64,15 +75,24 @@ class NetworkEnv(gym.Env):
                 if capacity > 0:
                     usage_to_capacity[i] = self.usage[i] / capacity  # Normalized [0-1+]
         
-        # Pad arrays to fixed size
-        padded_link_open = np.pad(self.link_open, (0, self.max_edges - self.num_edges), 'constant', constant_values=0)
-        padded_usage_ratio = np.pad(usage_to_capacity, (0, self.max_edges - self.num_edges), 'constant', constant_values=0.0)
+        # If using random edge order, rearrange link_open and usage_ratio according to permutation
+        # So the agent sees edges in the order it expects to make decisions
+        if self.random_edge_order:
+            permuted_link_open = self.link_open[self.inv_edge_perm]
+            permuted_usage_ratio = usage_to_capacity[self.inv_edge_perm]
+            padded_link_open = np.pad(permuted_link_open, (0, self.max_edges - self.num_edges), 'constant', constant_values=0)
+            padded_usage_ratio = np.pad(permuted_usage_ratio, (0, self.max_edges - self.num_edges), 'constant', constant_values=0.0)
+        else:
+            padded_link_open = np.pad(self.link_open, (0, self.max_edges - self.num_edges), 'constant', constant_values=0)
+            padded_usage_ratio = np.pad(usage_to_capacity, (0, self.max_edges - self.num_edges), 'constant', constant_values=0.0)
         
         # Include the current edge's local features
         if self.current_edge_idx < self.num_edges:
-            current_edge = self.edge_list[self.current_edge_idx]
+            # Get the actual edge index after permutation
+            actual_edge_idx = self.edge_perm[self.current_edge_idx]
+            current_edge = self.edge_list[actual_edge_idx]
             current_capacity = self.graph[current_edge[0]][current_edge[1]]['capacity']
-            current_usage = self.usage[self.current_edge_idx]
+            current_usage = self.usage[actual_edge_idx]
             current_ratio = current_usage / current_capacity if current_capacity > 0 else 0
         else:
             current_ratio = 0
@@ -101,6 +121,14 @@ class NetworkEnv(gym.Env):
             # Fall back to random selection if index is invalid
             self.traffic = random.choice(self.tm_list).copy() # Use a copy
 
+        # Generate random permutation of edge indices if enabled
+        if self.random_edge_order:
+            self.edge_perm = np.random.permutation(self.num_edges)
+            self.inv_edge_perm = np.argsort(self.edge_perm)
+        else:
+            self.edge_perm = np.arange(self.num_edges)  # Identity permutation
+            self.inv_edge_perm = np.arange(self.num_edges)
+            
         # Reset state variables
         self.current_edge_idx = 0
         self.link_open = np.ones(self.num_edges, dtype=int) # Start with all links open
@@ -137,7 +165,10 @@ class NetworkEnv(gym.Env):
 
         # Action 0 means try to close the current link, 1 means keep it open
         chosen_action_for_current_edge = action  # 0=close, 1=keep open
-        edge_to_modify = self.current_edge_idx
+        
+        # Map current_edge_idx to actual edge index using permutation
+        permuted_edge_idx = self.edge_perm[self.current_edge_idx]
+        edge_to_modify = permuted_edge_idx  # This is the actual edge in edge_list to modify
         
         # Additional safety check
         if edge_to_modify >= len(self.link_open):
@@ -159,52 +190,64 @@ class NetworkEnv(gym.Env):
             isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
 
             if isolated or overloaded:
-                # Violation occurred - penalize and revert the change
-                self.link_open[edge_to_modify] = original_state # Revert
-                self._update_link_usage() # Recalculate usage with link open again
                 # Calculate negative reward for violations
                 reward = 0
                 if isolated:
                     reward = -self.isolated_penalty
+                    # Track edge violation for importance analysis
+                    self.edge_violations["isolation"][edge_to_modify] += 1
                 elif overloaded:
                     reward = -self.overloaded_penalty * num_overloaded
+                    # Track edge violation for importance analysis
+                    self.edge_violations["overloaded"][edge_to_modify] += 1
                 info['violation'] = 'isolated' if isolated else 'overloaded'
                 done = True  # Terminate episode on violation
+                # Track failed closing attempt
+                self.edge_decisions["close_failure"][edge_to_modify] += 1
             else:
                 # No violation - success! Keep link closed and give reward.
                 reward = self.energy_unit_reward
-                # Utilization reward removed as requested.
+                # Track reward contribution for importance analysis
+                self.edge_rewards[edge_to_modify] += reward
+                # Track successful closing
+                self.edge_decisions["close_success"][edge_to_modify] += 1
 
         else: # Action 1: Keep the link open
             # No change in link state, no energy reward, no penalty
             self.link_open[edge_to_modify] = 1 # Ensure it stays open
-            reward = 0
             
-            # Add capacity utilization component to reward
-            capacity_utilization_reward = 0
-            open_edges = np.where(self.link_open == 1)[0]
-            if len(open_edges) > 0:
-                util_sum = 0
-                for edge_idx in open_edges:
-                    u, v = self.edge_list[edge_idx]
-                    capacity = self.graph[u][v]['capacity']
-                    if capacity > 0:
-                        edge_util = self.usage[edge_idx] / capacity
-                        # Reward balanced utilization (neither too low nor too high)
-                        # Optimal utilization around 0.6-0.7
-                        util_reward = -abs(edge_util - 0.65)
-                        util_sum += util_reward
-                
-                avg_util_reward = util_sum / len(open_edges)
-                capacity_utilization_reward = avg_util_reward * 5  # Scale factor
+            # IMPORTANT FIX: Check for violations even when keeping links open
+            # This is crucial to detect cascading effects of sequential decisions
+            routing_successful, G_open = self._update_link_usage()
+            isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
             
-            # Add utilization reward to total reward
-            reward += capacity_utilization_reward
-            info['violation'] = None
-            # No need to re-route if link state didn't change from open to open
+            if isolated or overloaded:
+                # Violation occurred - penalize and terminate episode
+                reward = 0
+                if isolated:
+                    reward = -self.isolated_penalty
+                    # Track edge violation for importance analysis
+                    self.edge_violations["isolation"][edge_to_modify] += 1
+                elif overloaded:
+                    reward = -self.overloaded_penalty * num_overloaded
+                    # Track edge violation for importance analysis
+                    self.edge_violations["overloaded"][edge_to_modify] += 1
+                info['violation'] = 'isolated' if isolated else 'overloaded'
+                info['num_overloaded'] = num_overloaded if overloaded else 0
+                done = True  # Terminate episode on violation
+            else:
+                # No violations
+                reward = 0
+                info['violation'] = None
+            
+            # Track decision to keep open
+            self.edge_decisions["open"][edge_to_modify] += 1
 
         # Move to the next edge decision
         self.current_edge_idx += 1
+        
+        # Add real edge index to info
+        info['real_edge_idx'] = edge_to_modify
 
         # --- Check if episode is done --- 
         if self.current_edge_idx >= self.num_edges:
@@ -214,6 +257,9 @@ class NetworkEnv(gym.Env):
 
         obs = self._get_observation()
         action_mask = self._get_action_mask()
+        # Always ensure 'violation' is present in info
+        if 'violation' not in info:
+            info['violation'] = None
         info['action_mask'] = action_mask # Add mask to info
 
         # Return 5 values: observation, reward, done, truncated, info
@@ -268,38 +314,75 @@ class NetworkEnv(gym.Env):
         return routing_successful, G_open
 
 
-    def _check_violations(self, routing_successful, G_open):
-        """Checks for node isolation and link overload.
-
+    def _check_violations(self, routing_successful, G_open, epsilon=0.0):
+        """Check for network violations: isolated nodes and overloaded links.
+        
         Args:
-            routing_successful (bool): Whether routing could be performed.
-            G_open (nx.Graph): The graph containing only currently open links.
-
-        Returns:
-            tuple: (isolated, overloaded, num_overloaded)
+            routing_successful: Boolean indicating if routing was successful
+            G_open: NetworkX graph with only open links
+            epsilon: Tolerance for capacity violation (default: 0.02, 2%)
+                     This provides a safety margin to prevent false violations due to floating point errors
         """
-        isolated = False
+        # Check if any nodes are isolated (when they shouldn't be)
+        isolated = not routing_successful
+        
+        # Check if any links are overloaded (usage > capacity)
         overloaded = False
         num_overloaded = 0
-
-        # 1. Check for Node Isolation
-        if not routing_successful:
-            isolated = True
-        # Optional: Add check for disconnected G_open even if routing_successful was True initially
-        # This can happen if demands are zero, but the graph is still split.
-        # elif G_open.number_of_nodes() > 0 and not nx.is_connected(G_open):
-        #    isolated = True # Consider any disconnection an isolation for simplicity
-
-        # 2. Check for Link Overload
-        for i, (u, v) in enumerate(self.edge_list):
-            if self.link_open[i] == 1: # Only check open links
+        for i, usage in enumerate(self.usage):
+            if self.link_open[i] == 1:  # Only check open links
+                u, v = self.edge_list[i]
                 capacity = self.graph[u][v]['capacity']
-                if capacity > 0 and self.usage[i] > capacity:
+                
+                # Calculate percent of capacity used
+                percent_used = usage / capacity * 100.0
+                
+                # Add epsilon tolerance to prevent tiny floating point issues
+                # Only flag as overloaded if usage clearly exceeds capacity beyond floating point error range
+                if usage > capacity * (1.0 + epsilon):
+                    # This is a significant overload, not just a rounding error
                     overloaded = True
                     num_overloaded += 1
-
+        
         return isolated, overloaded, num_overloaded
-
+        
+    def get_edge_importance_data(self):
+        """Return collected data about edge importance."""
+        return {
+            "edge_rewards": self.edge_rewards.tolist(),
+            "edge_violations": {
+                "isolation": self.edge_violations["isolation"].tolist(),
+                "overloaded": self.edge_violations["overloaded"].tolist()
+            },
+            "edge_decisions": {
+                "open": self.edge_decisions["open"].tolist(),
+                "close_success": self.edge_decisions["close_success"].tolist(),
+                "close_failure": self.edge_decisions["close_failure"].tolist()
+            },
+            "edge_list": self.edge_list,
+            "num_edges": self.num_edges
+        }
+        
+    def save_edge_importance_data(self, filepath):
+        """Save edge importance data to a file."""
+        import json
+        import os
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Prepare data
+        data = self.get_edge_importance_data()
+        
+        # Convert edge_list to serializable format
+        data["edge_list"] = [list(edge) for edge in data["edge_list"]]
+        
+        # Save to file
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        return filepath
+        
     def render(self, mode='human', close=False):
         pass # Optional: Implement visualization if needed
 
