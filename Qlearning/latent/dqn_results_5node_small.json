@@ -1,0 +1,22 @@
+{
+  "0": {"reward": -10.00, "links_closed": 1, "status": "violation"},
+  "1": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "2": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "3": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "4": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "5": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "6": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "7": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "8": {"reward": 0.00, "links_closed": 0, "status": "Success"},
+  "9": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "10": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "11": {"reward": -10.00, "links_closed": 1, "status": "violation"},
+  "12": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "13": {"reward": -20.00, "links_closed": 2, "status": "violation"},
+  "14": {"reward": 0.00, "links_closed": 0, "status": "Success"},
+  "15": {"reward": 20.00, "links_closed": 2, "status": "Success"},
+  "16": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "17": {"reward": 30.00, "links_closed": 3, "status": "Success"},
+  "18": {"reward": 10.00, "links_closed": 1, "status": "Success"},
+  "19": {"reward": 20.00, "links_closed": 2, "status": "Success"}
+}

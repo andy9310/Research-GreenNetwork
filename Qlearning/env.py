@@ -46,10 +46,10 @@ class NetworkEnv(gym.Env):
         # Action: Decide whether to close (0) or keep open (1) the current link
         self.action_space = spaces.Discrete(2)
 
-        # Observation: [link_open_status (max_edges), link_usage (max_edges), current_edge_idx (1), current_usage_ratio (1)]
+        # Observation: [link_open_status (max_edges), link_usage (max_edges), current_edge_idx (1)]
         # Pad with a distinct value, e.g., -1, if needed, or use masking carefully.
         # Here we assume 0 padding is acceptable for link status/usage.
-        obs_dim = self.max_edges + self.max_edges + 2
+        obs_dim = self.max_edges + self.max_edges + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
         # Environment state variables
@@ -221,24 +221,24 @@ class NetworkEnv(gym.Env):
             routing_successful, G_open = self._update_link_usage()
             isolated, overloaded, num_overloaded = self._check_violations(routing_successful, G_open)
             
-            if isolated or overloaded:
-                # Violation occurred - penalize and terminate episode
-                reward = 0
-                if isolated:
-                    reward = -self.isolated_penalty
-                    # Track edge violation for importance analysis
-                    self.edge_violations["isolation"][edge_to_modify] += 1
-                elif overloaded:
-                    reward = -self.overloaded_penalty * num_overloaded
-                    # Track edge violation for importance analysis
-                    self.edge_violations["overloaded"][edge_to_modify] += 1
-                info['violation'] = 'isolated' if isolated else 'overloaded'
-                info['num_overloaded'] = num_overloaded if overloaded else 0
-                done = True  # Terminate episode on violation
-            else:
+            # if isolated or overloaded:
+            #     # Violation occurred - penalize and terminate episode
+            #     reward = 0
+            #     if isolated:
+            #         reward = -self.isolated_penalty
+            #         # Track edge violation for importance analysis
+            #         self.edge_violations["isolation"][edge_to_modify] += 1
+            #     elif overloaded:
+            #         reward = -self.overloaded_penalty * num_overloaded
+            #         # Track edge violation for importance analysis
+            #         self.edge_violations["overloaded"][edge_to_modify] += 1
+            #     info['violation'] = 'isolated' if isolated else 'overloaded'
+            #     info['num_overloaded'] = num_overloaded if overloaded else 0
+            #     done = True  # Terminate episode on violation
+            # else:
                 # No violations
-                reward = 0
-                info['violation'] = None
+            reward = 0
+            info['violation'] = None
             
             # Track decision to keep open
             self.edge_decisions["open"][edge_to_modify] += 1

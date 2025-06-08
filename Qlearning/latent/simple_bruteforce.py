@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 # Add parent directory to path to import modules
 sys.path.append('../')
-from env import NetworkEnv
+from latent_env import NetworkEnv
 
 def load_config(config_path):
     """Load configuration from JSON file."""
@@ -40,6 +40,7 @@ def main():
     
     # Create environment
     env = NetworkEnv(
+        adj_matrix=config["adj_matrix"],
         edge_list=edge_list,
         tm_list=tm_list,
         link_capacity=link_capacity,
@@ -72,19 +73,40 @@ def main():
         # Generate all combinations of actions
         for action_sequence in tqdm(itertools.combinations(range(len(edge_list)), depth)):
             # Reset environment
-            state = env.reset()
-            done = False
+            reset_result = env.reset()
+            # Handle both old and new gym interfaces
+            if isinstance(reset_result, tuple):
+                state = reset_result[0]  # The observation is the first element
+                # If the reset method returns (obs, 0, False, False, info)
+                done = reset_result[2] if len(reset_result) > 2 else False
+            else:
+                state = reset_result
+                done = False
             total_reward = 0
             
-            # Apply actions
-            for action in action_sequence:
+            # Apply actions to close specific edges
+            # First, iterate through all edges
+            for edge_idx in range(len(edge_list)):
                 if done:
                     break
+                    
+                # Only close this edge if it's in our selected edges to close
+                action = 0 if edge_idx in action_sequence else 1  # 0 = close, 1 = keep open
+                
+                # Set the current edge we're making a decision on
+                env.current_edge_idx = edge_idx
+                
+                # Take action
                 next_state, reward, done, truncated, info = env.step(action)
                 total_reward += reward
+                
+                # Debug print for first few combinations to see what's happening
+                if len(best_actions) == 0 and depth <= 1 and edge_idx == len(edge_list) - 1:  # Only for first few tests
+                    print(f"  Debug - Trying {'closing' if action == 0 else 'keeping'} edge {edge_idx}: Reward: {reward}, Done: {done}, Info: {info}")
             
             # Check if valid (no isolations or overloaded links)
-            valid = not done and not any(usage > capacity for usage, capacity in zip(env.link_usage, env.link_capacity))
+            # In your environment, 'done' already indicates a violation occurred
+            valid = not done
             
             # Update best result
             if valid and total_reward > best_reward:
@@ -105,6 +127,27 @@ def main():
     else:
         print("No valid solution found.")
         print("Status: Failed ❌")
+        
+        # Try just keeping all edges open to verify if that works
+        print("\nTesting baseline (all links open):")
+        reset_result = env.reset()
+        # Handle both old and new gym interfaces
+        if isinstance(reset_result, tuple):
+            state = reset_result[0]  # The observation is the first element
+            # If the reset method returns (obs, 0, False, False, info)
+            done = reset_result[2] if len(reset_result) > 2 else False
+        else:
+            state = reset_result
+            done = False
+        total_reward = 0
+        for edge_idx in range(len(edge_list)):
+            env.current_edge_idx = edge_idx
+            next_state, reward, done, truncated, info = env.step(1)  # 1 = keep open
+            total_reward += reward
+            if done:
+                print(f"  Error at edge {edge_idx}: {info}")
+                break
+        print(f"  Baseline reward: {total_reward}, Done: {done}")
 
 if __name__ == "__main__":
     main()

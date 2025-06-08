@@ -32,6 +32,70 @@ python Qlearning/train.py --config configs/config_name.json --architecture [mlp|
 - `--load-model`: Continue training from a previously saved model
 - `--gpu`: Use GPU for training if available
 
+## Quick Start Guide
+
+This section provides practical commands for quickly getting started with training and evaluating models using the smaller 5-node topology.
+
+### Training Q-Learning
+
+```bash
+# Activate GPU environment if available
+conda activate rl_hw3_new
+
+# Train using MLP architecture
+python Qlearning/train.py --config configs/config_5node.json --architecture mlp --gpu
+
+# Train using fat MLP architecture
+python Qlearning/train.py --config configs/config_5node.json --architecture fat_mlp --gpu
+
+# Train using Transformer architecture
+python Qlearning/train.py --config configs/config_5node.json --architecture transformer --gpu
+```
+
+### Training Monte Carlo
+
+```bash
+# Train Monte Carlo with same configuration
+python MonteCarlo/train.py --config configs/config_5node.json --architecture mlp --gpu
+```
+
+### Training with Traffic Matrix Representation Learning
+
+```bash
+# Train using Traffic Matrix Encoder for better generalization across traffic matrices
+python train_tm_encoder.py --config configs/extended_config_5node.json --tm-rounds 5 --episodes 500 --tm-embedding-dim 64
+
+# Evaluate model trained with Traffic Matrix Encoder
+python evaluate_tm_encoder.py --config configs/extended_config_5node.json --model-path models/tm_dqn_mlp_extended_config_5node.pth
+```
+
+### Evaluating Models
+
+```bash
+# Evaluate Q-Learning on different traffic matrices
+python Qlearning/evaluate.py --config configs/config_5node.json --architecture mlp --tm-index 0
+python Qlearning/evaluate.py --config configs/config_5node.json --architecture mlp --tm-index 1
+python Qlearning/evaluate.py --config configs/config_5node.json --architecture mlp --tm-index 2
+python Qlearning/evaluate.py --config configs/config_5node.json --architecture mlp --tm-index 3
+
+# Evaluate Monte Carlo method
+python MonteCarlo/evaluate.py --config configs/config_5node.json --architecture mlp
+```
+
+### Comparing Both Methods
+
+```bash
+# Run comparison with specific parameters
+python compare_methods.py --config configs/config_5node.json --architecture mlp --episodes-per-tm 2000 --epsilon-min 0.1 --epsilon-decay-steps 5000
+```
+
+### Running Bruteforce Optimization
+
+```bash
+# Find optimal configuration using bruteforce
+python testing_configs/run_bruteforce_tests.py --config configs/config_5node.json
+```
+
 ### Evaluation
 
 To evaluate a trained model, use the respective evaluation script for each approach:
@@ -156,3 +220,42 @@ For network optimization tasks with hard constraints (where violations must trig
 - Q-learning approaches like DQN are generally more effective than Monte Carlo methods
 - If using Monte Carlo, consider enhancing it with techniques like reward shaping, curriculum learning, or imitation learning
 - The advantage of Q-learning becomes more pronounced as the network size and complexity increase
+
+## Traffic Matrix Representation Learning
+
+Traffic Matrix Representation Learning is an advanced approach implemented in this project to help the model generalize across different traffic patterns. This is particularly valuable in network optimization, where the space of possible traffic matrices is infinite and training on all possible patterns is infeasible.
+
+### Key Concepts
+
+1. **Neural Encoding of Traffic Matrices**: Instead of treating each traffic matrix as a unique input, a neural encoder extracts meaningful features and patterns from the traffic matrix.
+
+2. **Embedding Vectors**: Traffic matrices are compressed into fixed-size embedding vectors that capture their essential characteristics and structure.
+
+3. **Combined State Representation**: These traffic matrix embeddings are combined with the network state for richer input to the Q-network.
+
+4. **Pattern Recognition**: The model learns to recognize underlying patterns in traffic distribution rather than memorizing specific traffic matrices.
+
+### Implementation Details
+
+The implementation consists of:
+
+- **TrafficMatrixEncoder**: A neural network that transforms traffic matrices into embeddings.
+- **EnhancedQNetwork**: A Q-network that operates on both state and traffic matrix embeddings.
+- **TMEnhancedDQNAgent**: An agent that incorporates traffic matrix awareness into the training process.
+
+### Training Process
+
+During training, the model:
+
+1. Cycles through available traffic matrices in shuffled order across multiple rounds
+2. Learns to extract relevant features from each traffic matrix
+3. Develops a policy that generalizes to traffic patterns rather than specific matrices
+
+### Benefits
+
+- **Better Generalization**: Models trained with this approach can handle new, unseen traffic matrices
+- **Transfer Learning**: Knowledge learned from one traffic pattern transfers to similar patterns
+- **Robust Performance**: Less vulnerability to specific traffic matrix characteristics
+- **Adaptability**: Can better respond to changing traffic conditions in the network
+
+This approach is particularly valuable for real-world deployments where traffic patterns evolve over time.
