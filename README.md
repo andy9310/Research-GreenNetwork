@@ -4,7 +4,7 @@
 ## Environment
 1. 200個節點2000個連結，40%的節點是邊緣節點，共80個host
 2. 整體網路劃分為三個區域，並設定其流量高峰期分別發生在不同時段，以模擬真實網路中因地理位置與應用需求差異所產生的非同步高峰
-3. 每個host每3~10s產生新的traffic flow ( 30~100 bytes ) (時間和大小隨機)，但分離尖峰時段的不同區間 (例如 尖峰時間每3~5s產生新的traffic flow ( 80~100 bytes )、 離峰時間每7~10s產生新的traffic flow ( 30~50 bytes ))
+3. 每個host每3~10s產生新的traffic flow ( 30~100 bytes ) (時間和大小隨機)，但分離尖峰時段的不同區間例如 尖峰時間每3~5s產生新的traffic flow ( 80~100 bytes )、 離峰時間每7~10s產生新的traffic flow ( 30~50 bytes )
 4. 每個 traffic flow 具有隨機的 priority 等級 (1~6)、根據大部分ISP企業規範
 
 ## Architecture
