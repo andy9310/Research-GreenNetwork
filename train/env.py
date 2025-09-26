@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import random
 
 from cluster import dynamic_clustering
+from algorithm import DeterministicLinkManager  # New import
 
 @dataclass
 class Flow:
@@ -39,6 +40,10 @@ class SDNEnv:
         self.inter_keep_opts = cfg["inter_cluster_keep_min"]
         self.prio_weights = {int(k): v for k, v in cfg["priority_weights"].items()}
         self.sla_latency_ms = {int(k): v for k, v in cfg["sla_latency_ms"].items()}
+
+        # Initialize deterministic link manager
+        algorithm_type = cfg.get("deactivation_algorithm", "greedy")
+        self.link_manager = DeterministicLinkManager(algorithm_type)
 
         self._build_topology()
         self._assign_regions_and_hosts()
@@ -105,7 +110,9 @@ class SDNEnv:
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
         """Action is a flat index -> thresholds per cluster + one inter-keep option"""
         thresholds, inter_keep = self._decode_action(action)
-        self._apply_action(thresholds, inter_keep)
+        
+        # Use the new deterministic algorithm system
+        self._apply_enhanced_action(thresholds, inter_keep)
 
         # Generate flows for this step
         self._generate_new_flows()
@@ -141,62 +148,16 @@ class SDNEnv:
         thresholds = [float(self.cluster_bins[i]) for i in thresholds_idx]
         return thresholds, self.inter_keep_opts[inter_idx]
 
-    def _apply_action(self, thresholds: List[float], inter_keep_min: int):
-        # Inter-cluster links: keep at least inter_keep_min per pair
-        # Then for each cluster, sleep links with utilization < threshold (we'll estimate via last step or degree proxy)
-        # For simplicity, use previous utilization or degree-based proxy when cold-start.
-        # We'll compute per-edge "proxy utilization" as 1/deg(u)+1/deg(v) scaled.
-        G = self.G_full
-        deg = {i: max(1, G.degree(i)) for i in G.nodes()}
-
-        # First: turn everything on (we'll selectively sleep below)
-        for u, v in G.edges():
-            G[u][v]["active"] = 1
-
-        # Enforce inter-cluster keep
-        # Count edges between region pairs
-        region_edges = {}
-        for u, v in G.edges():
-            cu, cv = self.region_of[u], self.region_of[v]
-            if cu != cv:
-                key = tuple(sorted((cu, cv)))
-                region_edges.setdefault(key, []).append((u, v))
-        for key, edges in region_edges.items():
-            # Rank edges by a simple score (keep more "important" edges on)
-            scores = []
-            for (u, v) in edges:
-                score = deg[u] + deg[v]
-                scores.append(((u, v), score))
-            edges_sorted = [e for e,_ in sorted(scores, key=lambda x: -x[1])]
-            # Keep the top 'inter_keep_min' on, others eligible for sleep
-            keep_set = set(edges_sorted[:max(1, min(inter_keep_min, len(edges_sorted)))])
-            for (u, v) in edges:
-                if (u, v) not in keep_set:
-                    G[u][v]["active"] = 0  # mark sleep for now
-
-        # Now per-cluster thresholding
-        # Compute proxy utilization: here as inverse degree heuristic
-        for u, v in G.edges():
-            if self.region_of[u] == self.region_of[v]:  # intra-cluster edge
-                c = self.region_of[u]
-                thr = thresholds[c]
-                proxy_util = 0.5*(1.0/deg[u] + 1.0/deg[v])  # in (0,1]
-                if proxy_util < thr:
-                    G[u][v]["active"] = 0
-
-        # Deterministic refinement: force-on edges on paths that currently carry high-priority flows
-        if self.cfg.get("deterministic_refinement", True):
-            hi_flows = [f for f in self._flows if f.prio <= 2]  # EF & AF4
-            for f in hi_flows:
-                path = self._shortest_path_active(f.s, f.t)
-                if path is None:
-                    # if path absent, gradually re-enable lowest-degree sleeping edges along a baseline path
-                    base = nx.shortest_path(self.G_full, f.s, f.t, weight=None, method="dijkstra")
-                    for u, v in zip(base, base[1:]):
-                        self.G_full[u][v]["active"] = 1
-                else:
-                    for u, v in zip(path, path[1:]):
-                        self.G_full[u][v]["active"] = 1
+    def _apply_enhanced_action(self, thresholds: List[float], inter_keep_min: int):
+        """Use the new deterministic algorithm system"""
+        # Apply the complete deterministic deactivation strategy
+        self.link_manager.apply_complete_deactivation_strategy(
+            graph=self.G_full,
+            region_of=self.region_of,
+            thresholds=thresholds,
+            inter_keep_min=inter_keep_min,
+            flows=self._flows
+        )
 
     def _generate_new_flows(self):
         # Determine which region is in peak based on time
