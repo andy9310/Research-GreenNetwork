@@ -38,7 +38,7 @@ class SDNEnv:
         self.recluster_every = cfg["recluster_every_steps"]
         self.cluster_bins = np.array(cfg["cluster_threshold_bins"], dtype=float)
         self.inter_keep_opts = cfg["inter_cluster_keep_min"]
-        self.prio_weights = {int(k): v for k, v in cfg["priority_weights"].items()}
+        # self.prio_weights = {int(k): v for k, v in cfg["priority_weights"].items()}
         self.sla_latency_ms = {int(k): v for k, v in cfg["sla_latency_ms"].items()}
 
         # Initialize deterministic link manager
