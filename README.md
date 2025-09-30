@@ -33,10 +33,18 @@
    * compare.py
 
 ## technique identify
-### clustering 
+### clustering model
    * k-means (topology、traffic、service)
 ### 
- 
+
+### deterministic algorithm
+啟發式（heuristic）節能演算法，其操作方式如下：
+每一個時間點，根據目前的網路狀態判斷是否需要調整網路結構。
+在保證整個網路仍然保持連通（即每個節點仍能互相溝通）的前提下：
+關閉 buffer 長度低於 [30%] 的節點周圍連結，且過去5秒內的buffer length 成長率小於[30%]，這些節點表示目前流量負載較低。
+對於要關閉的連結中，保留那些 link usage（使用率）較高，大於[50%]的連結，其餘則關閉。
+將原本這些關閉連結的流量轉導至仍然開啟的連結，但要確保導入後的連結使用率不超過預設門檻 [90%]，以防止流量過載（overload）。
+
 ## important
 our method is not multi-agent reinforcemant learning
 網路規模的定義

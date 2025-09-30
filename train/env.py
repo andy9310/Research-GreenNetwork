@@ -41,6 +41,18 @@ class SDNEnv:
         # self.prio_weights = {int(k): v for k, v in cfg["priority_weights"].items()}
         self.sla_latency_ms = {int(k): v for k, v in cfg["sla_latency_ms"].items()}
 
+        # NEW: Traffic load management
+        self.traffic_load_mode = cfg.get("traffic_load_mode", "low")
+        self.traffic_modes = cfg.get("traffic_modes", {})
+        self.current_traffic_config = self.traffic_modes.get(self.traffic_load_mode, {})
+        
+        # Calculate target utilization for network
+        self.target_util_range = self.current_traffic_config.get("target_utilization_range", [0.2, 0.4])
+        self.flow_intensity_multiplier = self.current_traffic_config.get("flow_intensity_multiplier", 1.0)
+        
+        # Track network capacity for flow sizing
+        self._calculate_network_capacity()
+
         # Initialize deterministic link manager
         algorithm_type = cfg.get("deactivation_algorithm", "greedy")
         self.link_manager = DeterministicLinkManager(algorithm_type)
@@ -160,38 +172,51 @@ class SDNEnv:
         )
 
     def _generate_new_flows(self):
-        # Determine which region is in peak based on time
+        """Enhanced flow generation with traffic load control"""
         current_step = self._time
         peaks = self.cfg["peaks"]
         host_by_region = {r: [] for r in range(self.num_regions)}
+        
         for h in self.hosts:
             host_by_region[self.region_of[h]].append(h)
+        
+        # Get current traffic mode settings
+        traffic_config = self.current_traffic_config
+        target_min, target_max = self.target_util_range
+        
         for r in range(self.num_regions):
             lo, hi = peaks[f"region_{r}"]
             in_peak = (current_step % self.cfg["max_steps_per_episode"]) in range(lo, hi)
+            
+            # Determine flow probability based on traffic mode
             if in_peak:
-                interval = self.cfg["peak_flow_interval_s"]
-                size_rng = self.cfg["peak_size_range"]
+                base_prob = traffic_config.get("peak_flow_probability", 0.3)
             else:
-                interval = self.cfg["offpeak_flow_interval_s"]
-                size_rng = self.cfg["offpeak_size_range"]
+                base_prob = traffic_config.get("offpeak_flow_probability", 0.1)
+            
+            # Apply intensity multiplier
+            flow_prob = base_prob * self.flow_intensity_multiplier
+            
+            # Generate flows based on calculated probability
+            num_potential_flows = max(1, int(flow_prob * len(host_by_region[r]) / 2))
+            
+            for _ in range(num_potential_flows):
+                if random.random() < flow_prob and len(host_by_region[r]) >= 2:
+                    s, t = random.sample(host_by_region[r], 2)
+                    
+                    # Calculate flow size based on target utilization and path length
+                    flow_size = self._calculate_adaptive_flow_size(s, t, in_peak)
+                    
+                    # Priority based on flow size and traffic mode
+                    prio = self._assign_priority_by_size_and_mode(flow_size, in_peak)
+                    
+                    # Longer TTL for more realistic flows
+                    ttl = random.randint(5, 15)
+                    
+                    self._flows.append(Flow(s=s, t=t, size=flow_size, prio=prio, ttl=ttl))
 
-            # Probability to spawn a flow this step ~ 1/avg_interval
-            p = 1.0 / float(sum(interval)/2.0)
-            if random.random() < p and len(host_by_region[r]) >= 2:
-                s, t = random.sample(host_by_region[r], 2)
-                size = random.uniform(size_rng[0], size_rng[1])
-                prio = random.randint(1,6)
-                ttl = random.randint(3, 8)  # flow lasts a few steps
-                self._flows.append(Flow(s=s, t=t, size=size, prio=prio, ttl=ttl))
-
-        # decrement TTL & remove expired
-        alive = []
-        for f in self._flows:
-            f.ttl -= 1
-            if f.ttl > 0:
-                alive.append(f)
-        self._flows = alive
+        # Remove expired flows
+        self._flows = [f for f in self._flows if (f.ttl := f.ttl - 1) > 0]
 
     def _shortest_path_active(self, s: int, t: int):
         # Use only active edges
@@ -319,6 +344,95 @@ class SDNEnv:
         last_a = float(self._last_action if self._last_action is not None else 0) / float(max(1, self.action_n-1))
         feats.extend([inter_ratio, phase, last_a])
         return np.array(feats, dtype=np.float32)
+
+    def _calculate_network_capacity(self):
+        """Calculate total network capacity to size flows appropriately"""
+        self.total_network_capacity = 0
+        self.avg_edge_capacity = 0
+        
+        if hasattr(self, 'G_full'):
+            capacities = [data['capacity'] for _, _, data in self.G_full.edges(data=True)]
+            self.total_network_capacity = sum(capacities)
+            self.avg_edge_capacity = np.mean(capacities) if capacities else 5.0
+        else:
+            self.avg_edge_capacity = self.cfg.get("edge_capacity_mean", 5.0)
+            
+    def _calculate_adaptive_flow_size(self, s: int, t: int, in_peak: bool) -> float:
+        """Calculate flow size to achieve target utilization"""
+        target_min, target_max = self.target_util_range
+        
+        # Estimate path length (simplified)
+        try:
+            path_length = len(nx.shortest_path(self.G_full, s, t)) - 1
+        except:
+            path_length = 3  # Default assumption
+        
+        # Base flow size to achieve target utilization per edge on path
+        # Target utilization per flow = (target_total_util / expected_flows_per_edge)
+        expected_concurrent_flows = len(self._flows) / max(1, self.G_full.number_of_edges())
+        target_util_per_flow = np.random.uniform(target_min, target_max) / max(1, expected_concurrent_flows)
+        
+        # Flow size = target_utilization * average_capacity * scaling_factor
+        base_size = target_util_per_flow * self.avg_edge_capacity * 1000  # Convert to bytes
+        
+        # Add randomness and peak/off-peak variation
+        if in_peak:
+            size_multiplier = random.uniform(1.2, 2.0)  # Larger flows during peak
+        else:
+            size_multiplier = random.uniform(0.5, 1.2)  # Smaller flows off-peak
+        
+        final_size = base_size * size_multiplier
+        
+        # Ensure reasonable bounds
+        min_size = self.cfg.get("flow_size_bytes_min", 1000)
+        max_size = self.cfg.get("flow_size_bytes_max", 50000)
+        
+        return max(min_size, min(max_size, final_size))
+
+    def _assign_priority_by_size_and_mode(self, flow_size: float, in_peak: bool) -> int:
+        """Assign priority based on flow size and current conditions"""
+        # Larger flows get higher priority (lower numbers)
+        if flow_size > 30000:
+            priority_options = [1, 2] if in_peak else [1, 2, 3]
+        elif flow_size > 15000:
+            priority_options = [2, 3, 4] if in_peak else [3, 4]
+        elif flow_size > 5000:
+            priority_options = [3, 4, 5]
+        else:
+            priority_options = [4, 5, 6]
+            
+        return random.choice(priority_options)
+
+    def set_traffic_load_mode(self, mode: str):
+        """Change traffic load mode during runtime"""
+        if mode in self.traffic_modes:
+            self.traffic_load_mode = mode
+            self.current_traffic_config = self.traffic_modes[mode]
+            self.target_util_range = self.current_traffic_config.get("target_utilization_range", [0.2, 0.4])
+            self.flow_intensity_multiplier = self.current_traffic_config.get("flow_intensity_multiplier", 1.0)
+            print(f"🔄 Traffic load mode changed to: {mode} ({self.current_traffic_config.get('description', '')})")
+        else:
+            print(f"❌ Unknown traffic mode: {mode}. Available modes: {list(self.traffic_modes.keys())}")
+
+    def get_current_utilization_stats(self):
+        """Get current network utilization statistics"""
+        total_util = 0
+        active_edges = 0
+        
+        for u, v, data in self.G_full.edges(data=True):
+            if data.get("active", 1) == 1:
+                util = data.get("utilization", 0.0)
+                total_util += util
+                active_edges += 1
+        
+        avg_util = total_util / max(1, active_edges)
+        return {
+            "average_utilization": avg_util,
+            "total_utilization": total_util,
+            "active_edges": active_edges,
+            "target_range": self.target_util_range,
+            "current_mode": self.traffic_load_mode
+        }
 
     # Convenience for baselines
     def set_all_active(self):

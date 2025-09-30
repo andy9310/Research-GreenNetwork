@@ -94,7 +94,7 @@ class TrainingVisualizer:
         
         plt.tight_layout()
         plt.savefig(f'{self.save_dir}/training_curves_episode_{episode}.png', dpi=150, bbox_inches='tight')
-        plt.show()
+        plt.close()  # Close the figure instead of showing it
         
     def save_metrics(self, episode):
         """Save metrics to CSV"""
@@ -122,19 +122,28 @@ class TrainingVisualizer:
             'active_links': self.episode_active_links[-1]
         }
 
-def run_training(cfg_path="config.json"):
-    """Run enhanced training with visualization and metrics"""
-    print("Starting Training ...")
-    print("=" * 50)
+def run_training(cfg_path="config.json", traffic_mode=None):
+    """Run enhanced training with traffic load mode selection"""
+    print("Starting Training with Traffic Load Management ...")
+    print("=" * 60)
     
     # Load configuration
     with open(cfg_path, 'r') as f:
         cfg = json.load(f)['config']
     
+    # Override traffic mode if specified
+    if traffic_mode and traffic_mode in cfg.get("traffic_modes", {}):
+        cfg["traffic_load_mode"] = traffic_mode
+        print(f"🔧 Traffic mode overridden to: {traffic_mode}")
+    
+    current_mode = cfg.get("traffic_load_mode", "low")
+    traffic_desc = cfg.get("traffic_modes", {}).get(current_mode, {}).get("description", "Unknown")
+    
     print(f"📋 Configuration loaded from: {cfg_path}")
+    print(f"🚦 Traffic Load Mode: {current_mode} ({traffic_desc})")
     print(f"🎯 Episodes: {cfg['episodes']}, Steps: {cfg['max_steps_per_episode']}")
     print(f"🌐 Network: {cfg['num_nodes']} nodes, {cfg['num_edges']} edges")
-    print(f"🏠 Hosts: {cfg['num_hosts']} ({cfg['host_ratio']*100:.1f}%)")
+    print(f"🏠 Hosts: {cfg['num_hosts']} ({cfg.get('host_ratio', 0.4)*100:.1f}%)")
     print(f"🌍 Regions: {cfg['num_regions']}")
     
     # Initialize environment and agent
@@ -151,7 +160,7 @@ def run_training(cfg_path="config.json"):
     best_reward = float('-inf')
     
     print(f"\n🎬 Starting training for {cfg['episodes']} episodes...")
-    print("-" * 50)
+    print("-" * 60)
     
     for ep in range(cfg["episodes"]):
         obs = env.reset()
@@ -159,6 +168,7 @@ def run_training(cfg_path="config.json"):
         step_losses = []
         step_energy_savings = []
         step_latencies = []
+        step_utilizations = []
         
         for t in range(cfg["max_steps_per_episode"]):
             # Agent action
@@ -171,14 +181,24 @@ def run_training(cfg_path="config.json"):
             total_r += r
             
             # Training
-            if len(agent.buffer) >= cfg["batch_size"] and t_global % cfg["train_every"] == 0:
-                loss = agent.train()
+            if len(agent.rb) >= cfg["batch_size"] and t_global % cfg["train_every"] == 0:
+                loss = agent.train_step()
                 if loss is not None:
                     step_losses.append(loss)
             
+            # Update target network every 100 steps
+            if t_global % 100 == 0:
+                agent.update_target()
+            
             # Log step metrics
             energy_saving = info.get('energy_saving', 0.0)
-            latency = info.get('avg_latency', 0.0)
+            latency = info.get('avg_latency', info.get('latency_ms', 0.0))
+            
+            # Get utilization stats
+            util_stats = env.get_current_utilization_stats()
+            current_util = util_stats["average_utilization"]
+            step_utilizations.append(current_util)
+            
             visualizer.log_step(r, step_losses[-1] if step_losses else None, energy_saving, latency)
             step_energy_savings.append(energy_saving)
             step_latencies.append(latency)
@@ -192,7 +212,8 @@ def run_training(cfg_path="config.json"):
         avg_loss = np.mean(step_losses) if step_losses else 0.0
         avg_energy_saving = np.mean(step_energy_savings) if step_energy_savings else 0.0
         avg_latency = np.mean(step_latencies) if step_latencies else 0.0
-        sla_violations = info.get('sla_violations', 0.0)
+        avg_utilization = np.mean(step_utilizations) if step_utilizations else 0.0
+        sla_violations = info.get('sla_violations', info.get('sla_viol', 0.0))
         active_links = info.get('active_links', 0)
         
         # Log episode metrics
@@ -202,22 +223,29 @@ def run_training(cfg_path="config.json"):
         # Save best model
         if total_r > best_reward:
             best_reward = total_r
-            torch.save(agent.q_net.state_dict(), f"best_model_episode_{ep}.pth")
+            model_name = f"best_model_{current_mode}_episode_{ep}.pth"
+            torch.save(agent.q.state_dict(), model_name)
             print(f"💾 New best model saved! Reward: {total_r:.2f}")
         
         # Save model every 10 episodes
         if (ep + 1) % 10 == 0:
-            torch.save(agent.q_net.state_dict(), f"checkpoint_episode_{ep + 1}.pth")
+            checkpoint_name = f"checkpoint_{current_mode}_episode_{ep + 1}.pth"
+            torch.save(agent.q.state_dict(), checkpoint_name)
             print(f"💾 Checkpoint saved at episode {ep + 1}")
         
-        # Print progress
+        # Enhanced progress logging with utilization
+        target_min, target_max = env.target_util_range
+        util_status = "✅" if target_min <= avg_utilization <= target_max else "⚠️"
+        
         print(f"Episode {ep + 1:3d}/{cfg['episodes']} | "
               f"Reward: {total_r:8.2f} | "
               f"Loss: {avg_loss:6.4f} | "
               f"Energy: {avg_energy_saving:5.1f}% | "
               f"Latency: {avg_latency:6.2f}ms | "
               f"SLA: {sla_violations:5.1f}% | "
-              f"Links: {active_links:3d}")
+              f"Links: {active_links:3d} | "
+              f"Flows: {len(env._flows):3d} | "
+              f"Util: {avg_utilization:5.1f}% {util_status}")
         
         # Plot every 10 episodes
         if (ep + 1) % 10 == 0:
@@ -225,17 +253,22 @@ def run_training(cfg_path="config.json"):
             visualizer.save_metrics(ep + 1)
     
     # Final model save
-    torch.save(agent.q_net.state_dict(), "final_model.pth")
-    print(f"\n💾 Final model saved!")
+    final_model_name = f"final_model_{current_mode}.pth"
+    torch.save(agent.q.state_dict(), final_model_name)
+    print(f"\n💾 Final model saved: {final_model_name}")
     
     # Final analysis
+    final_util_stats = env.get_current_utilization_stats()
     visualizer.save_metrics(cfg['episodes'])
-    print(f"\n📊 Training completed!")
+    
+    print(f"\n📊 Training completed for {current_mode} traffic mode!")
     print(f"📈 Best reward: {best_reward:.2f}")
     print(f"📈 Average reward: {np.mean(ep_rewards):.2f}")
     print(f"📈 Final energy saving: {avg_energy_saving:.1f}%")
     print(f"📈 Final latency: {avg_latency:.2f}ms")
     print(f"📈 Final SLA violations: {sla_violations:.1f}%")
+    print(f"📈 Final utilization: {final_util_stats['average_utilization']:.1f}%")
+    print(f"📈 Target utilization: {final_util_stats['target_range'][0]*100:.0f}-{final_util_stats['target_range'][1]*100:.0f}%")
     
     return {
         'best_reward': best_reward,
@@ -243,17 +276,33 @@ def run_training(cfg_path="config.json"):
         'final_energy_saving': avg_energy_saving,
         'final_latency': avg_latency,
         'final_sla_violations': sla_violations,
-        'final_path': 'final_model.pth'
+        'final_utilization': final_util_stats['average_utilization'],
+        'traffic_mode': current_mode,
+        'final_path': final_model_name
     }
 
 if __name__ == "__main__":
     import sys
     
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
-    results = run_training(cfg_path)
+    traffic_mode = sys.argv[2] if len(sys.argv) > 2 else None
+    
+    # Validate traffic mode
+    if traffic_mode:
+        with open(cfg_path, 'r') as f:
+            cfg = json.load(f)['config']
+        available_modes = list(cfg.get("traffic_modes", {}).keys())
+        if traffic_mode not in available_modes:
+            print(f"❌ Invalid traffic mode: {traffic_mode}")
+            print(f"Available modes: {available_modes}")
+            sys.exit(1)
+    
+    results = run_training(cfg_path, traffic_mode)
     
     if results:
         print("\n✅ Training completed successfully!")
+        print(f"📊 Traffic Mode: {results['traffic_mode']}")
+        print(f"📊 Final Utilization: {results['final_utilization']:.1f}%")
         print(f"📊 Check results in: training_results/")
         print(f"📈 Model file: {results['final_path']}")
     else:
