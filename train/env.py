@@ -57,17 +57,51 @@ class SDNEnv:
         algorithm_type = cfg.get("deactivation_algorithm", "greedy")
         self.link_manager = DeterministicLinkManager(algorithm_type)
 
+        # Clustering configuration
+        self.no_clustering = cfg.get("no_clustering", False)
+        self.adaptive_clustering = cfg.get("adaptive_clustering", False)
+        self.clustering_method = cfg.get("clustering_method", "silhouette")
+        self.clustering_k_range = cfg.get("clustering_k_range", [2, 10])
+        self.dp_means_lambda = cfg.get("dp_means_lambda", None)
+        
+        # Handle no-clustering mode (single big cluster)
+        if self.no_clustering:
+            self.num_clusters = 1  # Single cluster for entire network
+            self.max_clusters = 1
+            self.adaptive_clustering = False  # Disable adaptive clustering
+            print("🔄 No-clustering mode: Treating entire network as single cluster")
+        else:
+            # If adaptive, use max_clusters for action/obs space; else use fixed k
+            if self.adaptive_clustering:
+                self.max_clusters = self.clustering_k_range[1]
+                self.num_clusters = self.max_clusters  # Start with max for space definition
+            else:
+                self.num_clusters = cfg.get("num_clusters", self.num_regions)
+                self.max_clusters = self.num_clusters
+
         self._build_topology()
         self._assign_regions_and_hosts()
         self._time = 0
         self._flows: List[Flow] = []
         self._cluster_map: Dict[int, int] = {}
+        self._actual_num_clusters = self.num_clusters  # Track actual clusters after clustering
         self._last_action = None
+        
+        # Clustering statistics tracking
+        self.clustering_stats = {
+            'cluster_count_history': [],
+            'reclustering_events': 0,
+            'total_reclustering_time': 0.0,
+            'clustering_method_used': self.clustering_method if not self.no_clustering else "no_clustering"
+        }
 
-        # Observation / action sizes
-        self.num_clusters = self.num_regions  # we keep k=regions for clarity
-        self.action_n = self.num_clusters * len(self.cluster_bins) + len(self.inter_keep_opts)  # thresholds for each cluster + one global inter-keep choice
-        self.obs_dim = self.num_clusters * 6 + 3  # [traffic_in, traffic_out, active_links, mean_util, svc_hi_share, svc_lo_share]*K + inter_summary(3)
+        # Observation / action sizes (use max_clusters for consistent dimensions)
+        self.action_n = self.max_clusters * len(self.cluster_bins) + len(self.inter_keep_opts)  # thresholds for each cluster + one global inter-keep choice
+        self.obs_dim = self.max_clusters * 6 + 3  # [traffic_in, traffic_out, active_links, mean_util, svc_hi_share, svc_lo_share]*K + inter_summary(3)
+        
+        # Store original dimensions for agent compatibility
+        self._original_obs_dim = self.obs_dim
+        self._original_action_n = self.action_n
 
     def _build_topology(self):
         # Random geometric graph for spatial flavor
@@ -111,13 +145,88 @@ class SDNEnv:
         return self._observe()
 
     def _clusterize(self):
+        import time
+        start_time = time.time()
+        
+        # Handle no-clustering mode (single big cluster)
+        if self.no_clustering:
+            # Assign all nodes to cluster 0 (single big cluster)
+            self._cluster_map = {i: 0 for i in range(self.n)}
+            self._actual_num_clusters = 1
+            clustering_time = time.time() - start_time
+            
+            # Track statistics
+            self.clustering_stats['cluster_count_history'].append(1)
+            self.clustering_stats['total_reclustering_time'] += clustering_time
+            return
+        
         # Build a quick traffic matrix + svc share snapshot for clustering
         n = self.n
         tm = np.zeros((n, n), dtype=float)
+        
+        # Build actual traffic matrix from current flows if available
+        if len(self._flows) > 0:
+            for flow in self._flows:
+                tm[flow.s, flow.t] += flow.size
+        
         svcC = 6
         svc_share = np.ones((n, svcC), dtype=float)
-        svc_share /= svc_share.sum(axis=1, keepdims=True)
-        self._cluster_map = dynamic_clustering(self.G_full, tm, svc_share, k=self.num_clusters, seed=self.cfg.get("seed", 42))
+        
+        # Build service class share from current flow priorities
+        if len(self._flows) > 0:
+            svc_count = np.zeros((n, svcC), dtype=float)
+            for flow in self._flows:
+                svc_count[flow.s, flow.prio - 1] += 1
+                svc_count[flow.t, flow.prio - 1] += 1
+            # Normalize
+            row_sums = svc_count.sum(axis=1, keepdims=True)
+            svc_share = np.where(row_sums > 0, svc_count / row_sums, 1.0 / svcC)
+        else:
+            svc_share /= svc_share.sum(axis=1, keepdims=True)
+        
+        # Use adaptive clustering if enabled
+        if self.adaptive_clustering:
+            k_range = tuple(self.clustering_k_range)
+            self._cluster_map = dynamic_clustering(
+                self.G_full, tm, svc_share, 
+                k=None,  # Let it auto-determine
+                method=self.clustering_method,
+                k_range=k_range,
+                lambda_param=self.dp_means_lambda,
+                seed=self.cfg.get("seed", 42)
+            )
+            # Update actual cluster count
+            self._actual_num_clusters = len(set(self._cluster_map.values()))
+            
+            # CRITICAL FIX: Cap the number of clusters to max_clusters to prevent dimension mismatch
+            if self._actual_num_clusters > self.max_clusters:
+                print(f"⚠️  Warning: DP-means created {self._actual_num_clusters} clusters, capping to {self.max_clusters}")
+                # Reassign excess clusters to existing ones
+                unique_clusters = list(set(self._cluster_map.values()))
+                if len(unique_clusters) > self.max_clusters:
+                    # Keep the first max_clusters clusters, reassign the rest
+                    keep_clusters = unique_clusters[:self.max_clusters]
+                    excess_clusters = unique_clusters[self.max_clusters:]
+                    
+                    # Reassign excess clusters to the last kept cluster
+                    for node, cluster in self._cluster_map.items():
+                        if cluster in excess_clusters:
+                            self._cluster_map[node] = keep_clusters[-1]  # Assign to last kept cluster
+                    
+                    self._actual_num_clusters = self.max_clusters
+        else:
+            # Fixed k clustering
+            self._cluster_map = dynamic_clustering(
+                self.G_full, tm, svc_share, 
+                k=self.num_clusters, 
+                seed=self.cfg.get("seed", 42)
+            )
+            self._actual_num_clusters = self.num_clusters
+        
+        # Track clustering statistics
+        clustering_time = time.time() - start_time
+        self.clustering_stats['cluster_count_history'].append(self._actual_num_clusters)
+        self.clustering_stats['total_reclustering_time'] += clustering_time
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
         """Action is a flat index -> thresholds per cluster + one inter-keep option"""
@@ -141,11 +250,24 @@ class SDNEnv:
 
         self._time += 1
         if self._time % self.recluster_every == 0:
+            old_cluster_count = self._actual_num_clusters
             self._clusterize()
+            if not self.no_clustering and self._actual_num_clusters != old_cluster_count:
+                self.clustering_stats['reclustering_events'] += 1
 
         obs = self._observe(utilization=utilization)
         done = self._time >= self.cfg["max_steps_per_episode"]
-        info = {"energy": energy, "latency_ms": latency_ms, "sla_viol": sla_viol, "energy_saving": energy_saving}
+        
+        # Calculate active links count
+        active_links_count = sum(1 for _, _, d in self.G_full.edges(data=True) if d["active"] == 1)
+        
+        info = {
+            "energy": energy, 
+            "latency_ms": latency_ms, 
+            "sla_viol": sla_viol, 
+            "energy_saving": energy_saving,
+            "active_links": active_links_count
+        }
         self._last_action = action
         return obs, reward, done, info
 
@@ -153,11 +275,16 @@ class SDNEnv:
         binsK = len(self.cluster_bins)
         # thresholds per cluster chosen by taking a in base-binsK
         thresholds_idx = []
-        for _ in range(self.num_clusters):
+        for _ in range(self.max_clusters):
             thresholds_idx.append(a % binsK)
             a //= binsK
         inter_idx = a % len(self.inter_keep_opts)
         thresholds = [float(self.cluster_bins[i]) for i in thresholds_idx]
+        
+        # If using adaptive clustering, only use thresholds for actual clusters
+        if self.adaptive_clustering:
+            thresholds = thresholds[:self._actual_num_clusters]
+        
         return thresholds, self.inter_keep_opts[inter_idx]
 
     def _apply_enhanced_action(self, thresholds: List[float], inter_keep_min: int):
@@ -182,7 +309,6 @@ class SDNEnv:
         
         # Get current traffic mode settings
         traffic_config = self.current_traffic_config
-        target_min, target_max = self.target_util_range
         
         for r in range(self.num_regions):
             lo, hi = peaks[f"region_{r}"]
@@ -216,7 +342,9 @@ class SDNEnv:
                     self._flows.append(Flow(s=s, t=t, size=flow_size, prio=prio, ttl=ttl))
 
         # Remove expired flows
-        self._flows = [f for f in self._flows if (f.ttl := f.ttl - 1) > 0]
+        for f in self._flows:
+            f.ttl -= 1
+        self._flows = [f for f in self._flows if f.ttl > 0]
 
     def _shortest_path_active(self, s: int, t: int):
         # Use only active edges
@@ -305,12 +433,20 @@ class SDNEnv:
         return on * self.energy_on + off * self.energy_sleep
 
     def _observe(self, utilization: Dict[Tuple[int,int], float] = None) -> np.ndarray:
-        # Aggregate features per cluster
-        K = self.num_clusters
+        # Aggregate features per cluster (use actual clusters from _cluster_map)
+        K_actual = self._actual_num_clusters
+        K_max = self.max_clusters
         feats = []
         G = self.G_full
-        for c in range(K):
-            nodes = [i for i in range(self.n) if self.region_of[i] == c]
+        
+        # Compute features for actual clusters
+        for c in range(K_actual):
+            nodes = [i for i in range(self.n) if self._cluster_map.get(i, 0) == c]
+            if len(nodes) == 0:
+                # Empty cluster - use zeros
+                feats.extend([0.0] * 6)
+                continue
+                
             sub = G.subgraph(nodes).copy()
             active_links = sum(1 for _,_,d in sub.edges(data=True) if d["active"] == 1)
             mean_util = 0.0
@@ -330,11 +466,16 @@ class SDNEnv:
             lo = sum(1 for f in self._flows if ((f.s in nodes or f.t in nodes) and f.prio >= 5))
             feats.extend([float(tin), float(tout), float(active_links), float(mean_util), float(hi), float(lo)])
 
-        # Inter-cluster summary: number of active edges between each pair averaged
+        # Pad with zeros if using adaptive clustering and K_actual < K_max
+        if self.adaptive_clustering and K_actual < K_max:
+            padding = [0.0] * 6 * (K_max - K_actual)
+            feats.extend(padding)
+
+        # Inter-cluster summary: number of active edges between different clusters
         inter_active = 0
         inter_total = 0
         for u, v, d in G.edges(data=True):
-            if self.region_of[u] != self.region_of[v]:
+            if self._cluster_map.get(u, 0) != self._cluster_map.get(v, 0):
                 inter_total += 1
                 if d["active"] == 1:
                     inter_active += 1
@@ -356,6 +497,19 @@ class SDNEnv:
             self.avg_edge_capacity = np.mean(capacities) if capacities else 5.0
         else:
             self.avg_edge_capacity = self.cfg.get("edge_capacity_mean", 5.0)
+    
+    def get_clustering_statistics(self):
+        """Get clustering statistics for analysis"""
+        stats = self.clustering_stats.copy()
+        stats.update({
+            'current_cluster_count': self._actual_num_clusters,
+            'avg_cluster_count': np.mean(stats['cluster_count_history']) if stats['cluster_count_history'] else 1,
+            'cluster_count_std': np.std(stats['cluster_count_history']) if stats['cluster_count_history'] else 0,
+            'total_nodes': self.n,
+            'nodes_per_cluster': self.n / self._actual_num_clusters if self._actual_num_clusters > 0 else self.n,
+            'is_no_clustering': self.no_clustering
+        })
+        return stats
             
     def _calculate_adaptive_flow_size(self, s: int, t: int, in_peak: bool) -> float:
         """Calculate flow size to achieve target utilization"""

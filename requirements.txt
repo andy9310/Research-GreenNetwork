@@ -3,3 +3,5 @@ networkx
 gymnasium # Use gymnasium instead of gym
 torch
 tqdm
+scikit-learn>=1.0.0
+scipy>=1.7.0

@@ -21,6 +21,7 @@ class TrainingVisualizer:
         self.episode_latencies = []
         self.episode_sla_violations = []
         self.episode_active_links = []
+        self.episode_cluster_counts = []
         
         # Step-by-step metrics
         self.step_rewards = []
@@ -28,7 +29,7 @@ class TrainingVisualizer:
         self.step_energy_savings = []
         self.step_latencies = []
         
-    def log_episode(self, episode, reward, loss, energy_saving, latency, sla_viol, active_links):
+    def log_episode(self, episode, reward, loss, energy_saving, latency, sla_viol, active_links, cluster_count=1):
         """Log episode-level metrics"""
         self.episode_rewards.append(reward)
         self.episode_losses.append(loss if loss is not None else 0.0)
@@ -36,6 +37,7 @@ class TrainingVisualizer:
         self.episode_latencies.append(latency)
         self.episode_sla_violations.append(sla_viol)
         self.episode_active_links.append(active_links)
+        self.episode_cluster_counts.append(cluster_count)
         
     def log_step(self, reward, loss, energy_saving, latency):
         """Log step-level metrics"""
@@ -105,7 +107,8 @@ class TrainingVisualizer:
             'energy_saving': self.episode_energy_savings,
             'latency': self.episode_latencies,
             'sla_violations': self.episode_sla_violations,
-            'active_links': self.episode_active_links
+            'active_links': self.episode_active_links,
+            'cluster_count': self.episode_cluster_counts
         })
         metrics_df.to_csv(f'{self.save_dir}/training_metrics.csv', index=False)
         
@@ -119,7 +122,8 @@ class TrainingVisualizer:
             'energy_saving': self.episode_energy_savings[-1],
             'latency': self.episode_latencies[-1],
             'sla_violations': self.episode_sla_violations[-1],
-            'active_links': self.episode_active_links[-1]
+            'active_links': self.episode_active_links[-1],
+            'cluster_count': self.episode_cluster_counts[-1] if self.episode_cluster_counts else 1
         }
 
 def run_training(cfg_path="config.json", traffic_mode=None):
@@ -216,8 +220,11 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         sla_violations = info.get('sla_violations', info.get('sla_viol', 0.0))
         active_links = info.get('active_links', 0)
         
+        # Clustering statistics
+        clustering_stats = env.get_clustering_statistics()
+        
         # Log episode metrics
-        visualizer.log_episode(ep + 1, total_r, avg_loss, avg_energy_saving, avg_latency, sla_violations, active_links)
+        visualizer.log_episode(ep + 1, total_r, avg_loss, avg_energy_saving, avg_latency, sla_violations, active_links, clustering_stats['current_cluster_count'])
         ep_rewards.append(total_r)
         
         # Save best model
@@ -233,9 +240,13 @@ def run_training(cfg_path="config.json", traffic_mode=None):
             torch.save(agent.q.state_dict(), checkpoint_name)
             print(f"💾 Checkpoint saved at episode {ep + 1}")
         
-        # Enhanced progress logging with utilization
+        # Enhanced progress logging with utilization and clustering
         target_min, target_max = env.target_util_range
         util_status = "✅" if target_min <= avg_utilization <= target_max else "⚠️"
+        
+        # Clustering info
+        clustering_mode = "NO-CLUST" if env.no_clustering else f"CLUST-{env._actual_num_clusters}"
+        clustering_method = clustering_stats['clustering_method_used']
         
         print(f"Episode {ep + 1:3d}/{cfg['episodes']} | "
               f"Reward: {total_r:8.2f} | "
@@ -245,7 +256,8 @@ def run_training(cfg_path="config.json", traffic_mode=None):
               f"SLA: {sla_violations:5.1f}% | "
               f"Links: {active_links:3d} | "
               f"Flows: {len(env._flows):3d} | "
-              f"Util: {avg_utilization:5.1f}% {util_status}")
+              f"Util: {avg_utilization:5.1f}% {util_status} | "
+              f"Mode: {clustering_mode} ({clustering_method})")
         
         # Plot every 10 episodes
         if (ep + 1) % 10 == 0:
@@ -259,6 +271,7 @@ def run_training(cfg_path="config.json", traffic_mode=None):
     
     # Final analysis
     final_util_stats = env.get_current_utilization_stats()
+    final_clustering_stats = env.get_clustering_statistics()
     visualizer.save_metrics(cfg['episodes'])
     
     print(f"\n📊 Training completed for {current_mode} traffic mode!")
@@ -270,6 +283,16 @@ def run_training(cfg_path="config.json", traffic_mode=None):
     print(f"📈 Final utilization: {final_util_stats['average_utilization']:.1f}%")
     print(f"📈 Target utilization: {final_util_stats['target_range'][0]*100:.0f}-{final_util_stats['target_range'][1]*100:.0f}%")
     
+    # Clustering analysis
+    print(f"\n🔗 Clustering Analysis:")
+    print(f"📊 Clustering method: {final_clustering_stats['clustering_method_used']}")
+    print(f"📊 Final cluster count: {final_clustering_stats['current_cluster_count']}")
+    print(f"📊 Average cluster count: {final_clustering_stats['avg_cluster_count']:.1f}")
+    print(f"📊 Cluster count std: {final_clustering_stats['cluster_count_std']:.2f}")
+    print(f"📊 Reclustering events: {final_clustering_stats['reclustering_events']}")
+    print(f"📊 Total clustering time: {final_clustering_stats['total_reclustering_time']:.3f}s")
+    print(f"📊 Nodes per cluster: {final_clustering_stats['nodes_per_cluster']:.1f}")
+    
     return {
         'best_reward': best_reward,
         'avg_reward': np.mean(ep_rewards),
@@ -278,7 +301,9 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         'final_sla_violations': sla_violations,
         'final_utilization': final_util_stats['average_utilization'],
         'traffic_mode': current_mode,
-        'final_path': final_model_name
+        'final_path': final_model_name,
+        'clustering_stats': final_clustering_stats,
+        'no_clustering': env.no_clustering
     }
 
 if __name__ == "__main__":
