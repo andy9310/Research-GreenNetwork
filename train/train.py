@@ -3,9 +3,24 @@ import torch
 import matplotlib.pyplot as plt
 from typing import Dict, Any
 import pandas as pd
+import signal
+import sys
 
 from env import SDNEnv
 from agent import HierarchicalDQN
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully"""
+    global shutdown_requested
+    print("\n\n  Ctrl+C detected! Saving progress and shutting down gracefully...")
+    print("  Press Ctrl+C again to force quit (may lose data)")
+    shutdown_requested = True
+
+# Register signal handler
+signal.signal(signal.SIGINT, signal_handler)
 
 class TrainingVisualizer:
     """Class to handle training visualization and metrics collection"""
@@ -167,6 +182,11 @@ def run_training(cfg_path="config.json", traffic_mode=None):
     print("-" * 60)
     
     for ep in range(cfg["episodes"]):
+        # Check for shutdown request
+        if shutdown_requested:
+            print("\n🛑 Shutdown requested. Saving current progress...")
+            break
+            
         obs = env.reset()
         total_r = 0.0
         step_losses = []
@@ -175,6 +195,9 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         step_utilizations = []
         
         for t in range(cfg["max_steps_per_episode"]):
+            # Check for shutdown request in inner loop too
+            if shutdown_requested:
+                break
             # Agent action
             a = agent.act(obs)
             obs2, r, done, info = env.step(a)
@@ -242,19 +265,33 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         
         # Enhanced progress logging with utilization and clustering
         target_min, target_max = env.target_util_range
-        util_status = "✅" if target_min <= avg_utilization <= target_max else "⚠️"
+        # Convert target range from fraction to percentage for comparison
+        target_min_pct = target_min * 100
+        target_max_pct = target_max * 100
+        
+        # Check if network is overloaded
+        is_overloaded = util_stats.get("overloaded", False)
+        if is_overloaded:
+            util_status = "🔥"  # Overloaded
+        elif target_min_pct <= avg_utilization <= target_max_pct:
+            util_status = "✅"  # Within target
+        else:
+            util_status = "⚠️"  # Outside target
         
         # Clustering info
         clustering_mode = "NO-CLUST" if env.no_clustering else f"CLUST-{env._actual_num_clusters}"
         clustering_method = clustering_stats['clustering_method_used']
         
+        # Calculate total links for display
+        total_links = env.G_full.number_of_edges()
+        
         print(f"Episode {ep + 1:3d}/{cfg['episodes']} | "
               f"Reward: {total_r:8.2f} | "
               f"Loss: {avg_loss:6.4f} | "
-              f"Energy: {avg_energy_saving:5.1f}% | "
+              f"EnergySave: {avg_energy_saving*100:5.1f}% | "
               f"Latency: {avg_latency:6.2f}ms | "
               f"SLA: {sla_violations:5.1f}% | "
-              f"Links: {active_links:3d} | "
+              f"Links: {active_links}/{total_links} | "
               f"Flows: {len(env._flows):3d} | "
               f"Util: {avg_utilization:5.1f}% {util_status} | "
               f"Mode: {clustering_mode} ({clustering_method})")
@@ -267,20 +304,15 @@ def run_training(cfg_path="config.json", traffic_mode=None):
     # Final model save
     final_model_name = f"final_model_{current_mode}.pth"
     torch.save(agent.q.state_dict(), final_model_name)
-    print(f"\n💾 Final model saved: {final_model_name}")
+    print(f"\n Final model saved: {final_model_name}")
     
     # Final analysis
     final_util_stats = env.get_current_utilization_stats()
     final_clustering_stats = env.get_clustering_statistics()
-    visualizer.save_metrics(cfg['episodes'])
+    visualizer.save_metrics(len(ep_rewards))  # Use actual episode count
     
-    print(f"\n📊 Training completed for {current_mode} traffic mode!")
-    print(f"📈 Best reward: {best_reward:.2f}")
-    print(f"📈 Average reward: {np.mean(ep_rewards):.2f}")
-    print(f"📈 Final energy saving: {avg_energy_saving:.1f}%")
-    print(f"📈 Final latency: {avg_latency:.2f}ms")
-    print(f"📈 Final SLA violations: {sla_violations:.1f}%")
-    print(f"📈 Final utilization: {final_util_stats['average_utilization']:.1f}%")
+    if shutdown_requested:
+        print(f"\n  Training interrupted at episode {ep + 1}/{cfg['episodes']}")
     print(f"📈 Target utilization: {final_util_stats['target_range'][0]*100:.0f}-{final_util_stats['target_range'][1]*100:.0f}%")
     
     # Clustering analysis

@@ -178,11 +178,13 @@ class SDNEnv:
             for flow in self._flows:
                 svc_count[flow.s, flow.prio - 1] += 1
                 svc_count[flow.t, flow.prio - 1] += 1
-            # Normalize
+            # Normalize with safe division
             row_sums = svc_count.sum(axis=1, keepdims=True)
-            svc_share = np.where(row_sums > 0, svc_count / row_sums, 1.0 / svcC)
+            # Avoid division by zero: use epsilon for numerical stability
+            svc_share = np.divide(svc_count, row_sums, out=np.full_like(svc_count, 1.0 / svcC), where=row_sums > 0)
         else:
-            svc_share /= svc_share.sum(axis=1, keepdims=True)
+            row_sums = svc_share.sum(axis=1, keepdims=True)
+            svc_share = np.divide(svc_share, row_sums, out=np.full_like(svc_share, 1.0 / svcC), where=row_sums > 0)
         
         # Use adaptive clustering if enabled
         if self.adaptive_clustering:
@@ -239,13 +241,32 @@ class SDNEnv:
         self._generate_new_flows()
 
         # Route flows and compute latency/energy
-        latency_ms, sla_viol, utilization = self._route_and_measure()
+        latency_ms, sla_viol_pct, utilization = self._route_and_measure()
 
         energy = self._energy_cost()
         # Reward: energy saving positive, latency & SLA viol negative (weighted)
         base_all_on = self.energy_on * self.G_full.number_of_edges()
         energy_saving = (base_all_on - energy) / base_all_on
-        penalty = 0.002 * latency_ms + 0.02 * sla_viol  # scaled down
+        
+        # Balanced penalty for SLA violations and overload
+        # Strong enough to matter, but allows agent to learn trade-offs
+        latency_penalty = 0.001 * latency_ms
+        sla_penalty = 0.05 * sla_viol_pct  # 5× stronger (was 0.1, reduced from 10×)
+        
+        # EXTREME overload penalty - overload should NEVER happen in real networks
+        util_stats = self.get_current_utilization_stats()
+        avg_util_pct = util_stats["average_utilization"]
+        overload_penalty = 0.0
+        
+        if avg_util_pct > 100.0:
+            # Catastrophic overload (>100%) - this should never happen
+            overload_penalty = 10.0  # Massive penalty to completely dominate reward
+        elif avg_util_pct > 80.0:
+            # High utilization (80-100%) - exponential penalty
+            excess = avg_util_pct - 80.0
+            overload_penalty = 0.1 * (excess ** 1.5)  # Exponential growth: 0.2 at 84%, 0.9 at 90%, 2.8 at 100%
+        
+        penalty = latency_penalty + sla_penalty + overload_penalty
         reward = energy_saving - penalty
 
         self._time += 1
@@ -264,7 +285,7 @@ class SDNEnv:
         info = {
             "energy": energy, 
             "latency_ms": latency_ms, 
-            "sla_viol": sla_viol, 
+            "sla_viol": sla_viol_pct, 
             "energy_saving": energy_saving,
             "active_links": active_links_count
         }
@@ -359,12 +380,18 @@ class SDNEnv:
         except nx.NetworkXNoPath:
             return None
 
-    def _route_and_measure(self) -> Tuple[float, int, Dict[Tuple[int,int], float]]:
+    def _route_and_measure(self) -> Tuple[float, float, Dict[Tuple[int,int], float]]:
         # Simple routing: route each flow along current shortest path (active edges only)
         # accumulate per-edge utilization and compute per-flow latency
+        
+        # Reset all edge utilizations to 0 before measuring
+        for u, v in self.G_full.edges():
+            self.G_full[u][v]["utilization"] = 0.0
+        
         util = {(u, v): 0.0 for u, v in self.G_full.edges()}
         total_latency_ms = 0.0
         sla_viol = 0
+        total_flows = len(self._flows)
 
         # prebuild active subgraph
         H = nx.Graph()
@@ -396,8 +423,10 @@ class SDNEnv:
 
             # add congestion penalty based on temp utilization
             # we approximate utilization by incrementing edge loads by flow "size"
-            # size is in bytes; convert to unitless load via /100
-            flow_load = f.size / 100.0
+            # Normalize flow size to capacity units (assuming capacity is in Mbps and size in bytes)
+            # Convert bytes to Mbits: size_bytes / (1024*1024/8) = size_bytes / 131072
+            # Then normalize by a time unit (assume 1ms transmission time)
+            flow_load = f.size / 1000.0  # Simplified: treat as load units
             edge_delay = 0.0
             for (u, v) in edges:
                 util[(u, v)] += flow_load
@@ -415,12 +444,18 @@ class SDNEnv:
             if flow_latency > self.sla_latency_ms[f.prio]:
                 sla_viol += 1
 
-        # normalize util to fraction
+        # Calculate average latency and SLA violation percentage
+        avg_latency = total_latency_ms / max(1, total_flows)
+        sla_viol_pct = (sla_viol / max(1, total_flows)) * 100.0
+        
+        # normalize util to fraction and store in graph
         util_frac = {}
         for (u, v), load in util.items():
             cap = self.G_full[u][v]["capacity"]
             util_frac[(u, v)] = load / max(cap, 1e-6)
-        return total_latency_ms, sla_viol, util_frac
+            # Store utilization in graph for later retrieval
+            self.G_full[u][v]["utilization"] = util_frac[(u, v)]
+        return avg_latency, sla_viol_pct, util_frac
 
     def _energy_cost(self) -> float:
         on = 0
@@ -572,20 +607,28 @@ class SDNEnv:
         """Get current network utilization statistics"""
         total_util = 0
         active_edges = 0
+        max_util = 0
         
         for u, v, data in self.G_full.edges(data=True):
             if data.get("active", 1) == 1:
                 util = data.get("utilization", 0.0)
                 total_util += util
+                max_util = max(max_util, util)
                 active_edges += 1
         
-        avg_util = total_util / max(1, active_edges)
+        # Utilization is already a fraction (0-1), convert to percentage
+        # Cap at 100% for display (overload is shown separately)
+        avg_util = min(100.0, (total_util / max(1, active_edges)) * 100)
+        max_util_pct = min(100.0, max_util * 100)
+        
         return {
             "average_utilization": avg_util,
+            "max_utilization": max_util_pct,
             "total_utilization": total_util,
             "active_edges": active_edges,
             "target_range": self.target_util_range,
-            "current_mode": self.traffic_load_mode
+            "current_mode": self.traffic_load_mode,
+            "overloaded": max_util > 1.0
         }
 
     # Convenience for baselines

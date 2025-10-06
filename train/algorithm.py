@@ -446,6 +446,34 @@ class DeterministicLinkManager:
             if data.get("active", 1) == 1:
                 active_graph.add_edge(u, v)
         
+        # Ensure minimum number of active links (at least 10% of total for adequate capacity)
+        # Reduced from 200 to 150 to allow agent more flexibility
+        total_edges = graph.number_of_edges()
+        min_active_links = max(150, int(0.075 * total_edges))  # At least 150 or 7.5% of edges
+        current_active = active_graph.number_of_edges()
+        
+        if current_active < min_active_links:
+            # Activate more links to ensure good connectivity
+            # Strategy: Use betweenness centrality to activate important bridge edges
+            import random
+            inactive_edges = [(u, v) for u, v, d in graph.edges(data=True) if d.get("active", 1) == 0]
+            
+            # Calculate edge betweenness on full graph (expensive but important)
+            try:
+                edge_betweenness = nx.edge_betweenness_centrality(graph, k=min(50, graph.number_of_nodes()))
+                # Sort by betweenness (most important bridges first)
+                inactive_edges.sort(key=lambda e: edge_betweenness.get((e[0], e[1]), edge_betweenness.get((e[1], e[0]), 0)), reverse=True)
+            except:
+                # Fallback: sort by degree
+                node_degrees = dict(graph.degree())
+                inactive_edges.sort(key=lambda e: node_degrees[e[0]] + node_degrees[e[1]], reverse=True)
+            
+            # Activate top edges until we reach minimum
+            needed = min_active_links - current_active
+            for u, v in inactive_edges[:needed]:
+                graph[u][v]["active"] = 1
+                active_graph.add_edge(u, v)
+        
         if nx.is_connected(active_graph):
             return  # Already connected
         
