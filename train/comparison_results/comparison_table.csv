@@ -1,5 +1,0 @@
-Method,No Clustering,Clustering Method,Avg Cluster Count,Final Cluster Count,Reclustering Events,Clustering Time (s),Best Reward,Avg Reward,Energy Saving (%),Latency (ms),SLA Violations (%),Training Time (s)
-No Clustering (Single Big Cluster),True,no_clustering,1.0,1,0,0.000,45.44,38.27,0.7,210.47,0.0,17.7
-DP-means Adaptive Clustering,False,dp_means_adaptive,9.0,10,5,31.206,-37.38,-45.06,0.9,463.75,2.0,48.2
-Fixed k=3 Clustering,False,dp_means_adaptive,3.0,3,0,0.915,-80.94,-86.75,0.9,560.75,3.0,15.6
-Silhouette Score Clustering,False,silhouette,2.4,2,14,1.492,-64.09,-85.60,0.9,523.50,1.0,17.2

@@ -37,6 +37,7 @@ class TrainingVisualizer:
         self.episode_sla_violations = []
         self.episode_active_links = []
         self.episode_cluster_counts = []
+        self.episode_computation_times = []
         
         # Step-by-step metrics
         self.step_rewards = []
@@ -44,7 +45,7 @@ class TrainingVisualizer:
         self.step_energy_savings = []
         self.step_latencies = []
         
-    def log_episode(self, episode, reward, loss, energy_saving, latency, sla_viol, active_links, cluster_count=1):
+    def log_episode(self, episode, reward, loss, energy_saving, latency, sla_viol, active_links, cluster_count=1, computation_time=0.0):
         """Log episode-level metrics"""
         self.episode_rewards.append(reward)
         self.episode_losses.append(loss if loss is not None else 0.0)
@@ -53,6 +54,7 @@ class TrainingVisualizer:
         self.episode_sla_violations.append(sla_viol)
         self.episode_active_links.append(active_links)
         self.episode_cluster_counts.append(cluster_count)
+        self.episode_computation_times.append(computation_time)
         
     def log_step(self, reward, loss, energy_saving, latency):
         """Log step-level metrics"""
@@ -123,7 +125,8 @@ class TrainingVisualizer:
             'latency': self.episode_latencies,
             'sla_violations': self.episode_sla_violations,
             'active_links': self.episode_active_links,
-            'cluster_count': self.episode_cluster_counts
+            'cluster_count': self.episode_cluster_counts,
+            'computation_time': self.episode_computation_times
         })
         metrics_df.to_csv(f'{self.save_dir}/training_metrics.csv', index=False)
         
@@ -193,6 +196,7 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         step_energy_savings = []
         step_latencies = []
         step_utilizations = []
+        step_computation_times = []
         
         for t in range(cfg["max_steps_per_episode"]):
             # Check for shutdown request in inner loop too
@@ -200,7 +204,13 @@ def run_training(cfg_path="config.json", traffic_mode=None):
                 break
             # Agent action
             a = agent.act(obs)
+            
+            # Measure computation time for the action (including clustering)
+            action_start_time = time.time()
             obs2, r, done, info = env.step(a)
+            action_end_time = time.time()
+            action_computation_time = (action_end_time - action_start_time) * 1000  # Convert to milliseconds
+            step_computation_times.append(action_computation_time)
             
             # Store experience
             agent.push(obs, a, r, obs2, float(done))
@@ -246,8 +256,11 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         # Clustering statistics
         clustering_stats = env.get_clustering_statistics()
         
+        # Calculate average computation time per step
+        avg_computation_time = np.mean(step_computation_times) if step_computation_times else 0.0
+        
         # Log episode metrics
-        visualizer.log_episode(ep + 1, total_r, avg_loss, avg_energy_saving, avg_latency, sla_violations, active_links, clustering_stats['current_cluster_count'])
+        visualizer.log_episode(ep + 1, total_r, avg_loss, avg_energy_saving, avg_latency, sla_violations, active_links, clustering_stats['current_cluster_count'], avg_computation_time)
         ep_rewards.append(total_r)
         
         # Save best model
@@ -269,11 +282,15 @@ def run_training(cfg_path="config.json", traffic_mode=None):
         target_min_pct = target_min * 100
         target_max_pct = target_max * 100
         
+        # Get actual utilization (uncapped) and display version
+        actual_util = util_stats.get("average_utilization", avg_utilization)
+        overloaded_edges = util_stats.get("overloaded_edges", 0)
+        
         # Check if network is overloaded
         is_overloaded = util_stats.get("overloaded", False)
         if is_overloaded:
-            util_status = "🔥"  # Overloaded
-        elif target_min_pct <= avg_utilization <= target_max_pct:
+            util_status = f"🔥({overloaded_edges})"  # Show number of overloaded edges
+        elif target_min_pct <= actual_util <= target_max_pct:
             util_status = "✅"  # Within target
         else:
             util_status = "⚠️"  # Outside target
@@ -293,7 +310,7 @@ def run_training(cfg_path="config.json", traffic_mode=None):
               f"SLA: {sla_violations:5.1f}% | "
               f"Links: {active_links}/{total_links} | "
               f"Flows: {len(env._flows):3d} | "
-              f"Util: {avg_utilization:5.1f}% {util_status} | "
+              f"Util: {actual_util:6.1f}% {util_status} | "
               f"Mode: {clustering_mode} ({clustering_method})")
         
         # Plot every 10 episodes

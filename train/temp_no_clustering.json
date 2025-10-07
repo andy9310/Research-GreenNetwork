@@ -1,0 +1,126 @@
+{
+  "config": {
+    "seed": 42,
+    "device": "cpu",
+    "episodes": 100,
+    "max_steps_per_episode": 200,
+    "train_every": 1,
+    "target_update": 100,
+    "buffer_size": 100000,
+    "batch_size": 256,
+    "gamma": 0.95,
+    "lr": 0.0003,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "epsilon_decay_steps": 5000,
+    "use_double_dqn": true,
+    "grad_clip_norm": 1.0,
+    "obs_aggregation": "cluster",
+    "energy_per_link_on": 1.0,
+    "energy_per_link_sleep": 0.1,
+    "congestion_delay_factor": 2.0,
+    "routing_k_paths": 3,
+    "num_nodes": 200,
+    "num_edges": 2000,
+    "num_regions": 3,
+    "edge_capacity_mean": 5.0,
+    "edge_capacity_std": 1.0,
+    "edge_base_delay_ms": 0.3,
+    "host_ratio": 0.4,
+    "num_hosts": 80,
+    "sla_latency_ms": {
+      "1": 1.0,
+      "2": 2.0,
+      "3": 4.0,
+      "4": 8.0,
+      "5": 16.0,
+      "6": 32.0
+    },
+    "traffic_load_mode": "low",
+    "traffic_modes": {
+      "low": {
+        "target_utilization_range": [
+          0.2,
+          0.4
+        ],
+        "flow_intensity_multiplier": 2.0,
+        "peak_flow_probability": 0.7,
+        "offpeak_flow_probability": 0.4,
+        "description": "20-40% link capacity utilization"
+      },
+      "high": {
+        "target_utilization_range": [
+          0.6,
+          0.8
+        ],
+        "flow_intensity_multiplier": 2.5,
+        "peak_flow_probability": 0.8,
+        "offpeak_flow_probability": 0.4,
+        "description": "60-80% link capacity utilization"
+      }
+    },
+    "flow_size_bytes_min": 1000,
+    "flow_size_bytes_max": 10000,
+    "peak_flow_interval_s": [
+      1,
+      3
+    ],
+    "offpeak_flow_interval_s": [
+      3,
+      7
+    ],
+    "peak_size_range": [
+      5000,
+      10000
+    ],
+    "offpeak_size_range": [
+      1000,
+      5000
+    ],
+    "peaks": {
+      "region_0": [
+        0,
+        60
+      ],
+      "region_1": [
+        60,
+        120
+      ],
+      "region_2": [
+        120,
+        180
+      ]
+    },
+    "recluster_every_steps": 30,
+    "cluster_threshold_bins": [
+      0.1,
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9
+    ],
+    "inter_cluster_keep_min": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "deterministic_refinement": true,
+    "adaptive_clustering": false,
+    "clustering_method": "dp_means_adaptive",
+    "clustering_k_range": [
+      2,
+      10
+    ],
+    "dp_means_lambda": 2.0,
+    "num_clusters": 3,
+    "no_clustering": true,
+    "eval_episodes": 5,
+    "log_every": 5,
+    "deactivation_algorithm": "priority"
+  }
+}

@@ -255,12 +255,14 @@ class SDNEnv:
         
         # EXTREME overload penalty - overload should NEVER happen in real networks
         util_stats = self.get_current_utilization_stats()
-        avg_util_pct = util_stats["average_utilization"]
+        avg_util_pct = util_stats["average_utilization"]  # Now uses ACTUAL uncapped value
         overload_penalty = 0.0
         
         if avg_util_pct > 100.0:
             # Catastrophic overload (>100%) - this should never happen
-            overload_penalty = 10.0  # Massive penalty to completely dominate reward
+            # Quadratic penalty based on ACTUAL overload amount
+            excess = avg_util_pct - 100.0
+            overload_penalty = 10.0 + 0.1 * (excess ** 2)  # Base 10 + quadratic growth
         elif avg_util_pct > 80.0:
             # High utilization (80-100%) - exponential penalty
             excess = avg_util_pct - 80.0
@@ -608,6 +610,7 @@ class SDNEnv:
         total_util = 0
         active_edges = 0
         max_util = 0
+        overloaded_edges = 0
         
         for u, v, data in self.G_full.edges(data=True):
             if data.get("active", 1) == 1:
@@ -615,17 +618,25 @@ class SDNEnv:
                 total_util += util
                 max_util = max(max_util, util)
                 active_edges += 1
+                if util > 1.0:
+                    overloaded_edges += 1
         
-        # Utilization is already a fraction (0-1), convert to percentage
-        # Cap at 100% for display (overload is shown separately)
-        avg_util = min(100.0, (total_util / max(1, active_edges)) * 100)
-        max_util_pct = min(100.0, max_util * 100)
+        # Calculate ACTUAL utilization without capping (for penalties/rewards)
+        avg_util_actual = (total_util / max(1, active_edges)) * 100
+        max_util_actual = max_util * 100
+        
+        # For display, cap at 100% but keep actual values for calculations
+        avg_util_display = min(100.0, avg_util_actual)
+        max_util_display = min(100.0, max_util_actual)
         
         return {
-            "average_utilization": avg_util,
-            "max_utilization": max_util_pct,
+            "average_utilization": avg_util_actual,  # ACTUAL value for calculations
+            "average_utilization_display": avg_util_display,  # Capped for display
+            "max_utilization": max_util_actual,  # ACTUAL value
+            "max_utilization_display": max_util_display,  # Capped for display
             "total_utilization": total_util,
             "active_edges": active_edges,
+            "overloaded_edges": overloaded_edges,
             "target_range": self.target_util_range,
             "current_mode": self.traffic_load_mode,
             "overloaded": max_util > 1.0
