@@ -1,0 +1,13 @@
+{
+  "reward": -53.51897051367771,
+  "reward_std": 117.35869413678962,
+  "energy_saving": 18.63708415841584,
+  "energy_saving_std": 9.037091105598753,
+  "latency": 6.166992506030907,
+  "latency_std": 6.2302181786330175,
+  "sla_violations": 8.955974032930323,
+  "sla_violations_std": 13.339182748060319,
+  "computation_time": 1.2440528869628907e-05,
+  "q_table_size": 15,
+  "total_updates": 100000
+}

@@ -1,0 +1,11 @@
+{
+  "energy_saving": 39.99898514851485,
+  "energy_saving_std": 0.5975738755062664,
+  "latency": 3.085890019323986,
+  "latency_std": 0.13554124649930782,
+  "sla_violations": 1.9667987031933252,
+  "sla_violations_std": 0.2868835350883361,
+  "computation_time": 0.0006162816882133484,
+  "avg_active_links": 56.11225,
+  "total_links": 101
+}
